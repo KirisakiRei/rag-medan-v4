@@ -81,24 +81,28 @@ def _call_gemini_llm(
 def _extract_json(text: str) -> Optional[Dict]:
     """Extract JSON from text response, handling markdown code blocks."""
     if not text:
+        logger.warning("[JSON PARSE] Empty text received")
         return None
+    
     try:
-        # Step 1: Remove markdown code blocks if present (```json ... ``` or ``` ... ```)
         cleaned_text = text.strip()
+        original_text = cleaned_text  # Keep for logging
         
-        # Pattern untuk remove ```json atau ``` di awal dan ``` di akhir
+        # Step 1: Remove markdown code blocks if present (```json ... ``` or ``` ... ```)
         code_block_pattern = r"^```(?:json)?\s*\n?(.*?)\n?```$"
         code_block_match = re.search(code_block_pattern, cleaned_text, re.DOTALL | re.IGNORECASE)
         
         if code_block_match:
             cleaned_text = code_block_match.group(1).strip()
-            logger.debug(f"[JSON PARSE] Extracted from code block: {cleaned_text[:50]}...")
+            logger.debug(f"[JSON PARSE] Stripped markdown code block, content: {cleaned_text[:100]}...")
         
         # Step 2: Try direct JSON parse first (cleaner approach)
         try:
-            return json.loads(cleaned_text)
-        except json.JSONDecodeError:
-            pass
+            result = json.loads(cleaned_text)
+            logger.debug(f"[JSON PARSE] Direct parse SUCCESS: {result}")
+            return result
+        except json.JSONDecodeError as e:
+            logger.debug(f"[JSON PARSE] Direct parse failed: {e}, trying regex...")
         
         # Step 3: Fallback - extract JSON object using regex
         json_match = re.search(r"\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}", cleaned_text, re.DOTALL)
@@ -107,15 +111,19 @@ def _extract_json(text: str) -> Optional[Dict]:
             json_match = re.search(r"\{.*\}", cleaned_text, re.DOTALL)
         
         if not json_match:
-            logger.warning(f"[JSON PARSE] No JSON found in: {text[:100]}...")
+            # Log full response for debugging
+            logger.warning(f"[JSON PARSE] No JSON found. Full LLM response:\n{original_text}")
             return None
-            
-        return json.loads(json_match.group(0))
+        
+        result = json.loads(json_match.group(0))
+        logger.debug(f"[JSON PARSE] Regex parse SUCCESS: {result}")
+        return result
+        
     except json.JSONDecodeError as e:
-        logger.warning(f"[JSON PARSE] Invalid JSON structure: {e}")
+        logger.warning(f"[JSON PARSE] Invalid JSON structure: {e}. Text: {text[:200]}...")
         return None
     except Exception as e:
-        logger.exception(f"[JSON PARSE] Failed to parse: {e}")
+        logger.exception(f"[JSON PARSE] Unexpected error: {e}. Text: {text[:200]}...")
         return None
 
 
@@ -145,24 +153,34 @@ def ai_pre_filter(question: str) -> Dict[str, Any]:
         )
 
         if not llm_content:
-            return {"valid": True, "reason": "LLM error (fallback)", "clean_question": question}
+            logger.warning("[AI-FILTER] No LLM response, defaulting to valid=True")
+            return {"valid": True, "reason": "LLM tidak merespons (fallback)", "clean_question": question}
 
-        parsed_result = _extract_json(llm_content) or {
-            "valid": True,
-            "reason": "AI tidak mengembalikan JSON",
-            "clean_question": question
-        }
+        parsed_result = _extract_json(llm_content)
+        
+        if not parsed_result or not isinstance(parsed_result, dict):
+            # Fallback: try extract valid status from text
+            logger.warning(f"[AI-FILTER] JSON parse failed, attempting text extraction...")
+            lower_content = llm_content.lower()
+            
+            if '"valid": false' in lower_content or '"valid":false' in lower_content:
+                logger.info("[AI-FILTER] Extracted valid=false from text")
+                return {"valid": False, "reason": "Extracted from text (JSON parse failed)", "clean_question": question}
+            
+            # Default to valid=True to not block legitimate questions
+            logger.warning("[AI-FILTER] Could not extract valid status, defaulting to True")
+            return {"valid": True, "reason": "JSON parse gagal (fallback)", "clean_question": question}
 
-        logger.info(f"[AI-FILTER] Result: valid={parsed_result.get('valid')}")
+        logger.info(f"[AI-FILTER] Result: valid={parsed_result.get('valid')}, reason={parsed_result.get('reason', '-')[:50]}")
         return parsed_result
 
     except (ConnectionError, Timeout) as e:
         logger.error(f"[AI-FILTER] Connection error: {e}")
-        return {"valid": True, "reason": f"LLM connection error (fallback): {e}", "clean_question": question}
+        return {"valid": True, "reason": "LLM connection error (fallback)", "clean_question": question}
 
     except Exception as e:
         logger.exception(f"[AI-FILTER] Exception: {e}")
-        return {"valid": True, "reason": f"Fallback error: {e}", "clean_question": question}
+        return {"valid": True, "reason": f"Fallback error: {str(e)[:50]}", "clean_question": question}
 
 
 def ai_check_relevance(user_question: str, rag_result: str) -> Dict[str, Any]:
@@ -185,27 +203,43 @@ def ai_check_relevance(user_question: str, rag_result: str) -> Dict[str, Any]:
         )
 
         if not llm_content:
-            return {"relevant": True, "reason": "LLM error", "reformulated_question": ""}
+            logger.warning("[AI-POST] No LLM response, defaulting to relevant=True")
+            return {"relevant": True, "reason": "LLM tidak merespons", "reformulated_question": ""}
 
         parsed_result = _extract_json(llm_content)
         if not parsed_result or not isinstance(parsed_result, dict):
-            parsed_result = {"relevant": True, "reason": "Invalid JSON", "reformulated_question": ""}
+            # IMPORTANT: Jika JSON parse gagal tapi LLM memberikan response,
+            # coba extract relevant status dari text secara manual
+            logger.warning(f"[AI-POST] JSON parse failed, attempting text extraction...")
+            
+            # Simple text-based extraction as fallback
+            lower_content = llm_content.lower()
+            if '"relevant": false' in lower_content or '"relevant":false' in lower_content:
+                logger.info("[AI-POST] Extracted relevant=false from text")
+                return {"relevant": False, "reason": "Extracted from text (JSON parse failed)", "reformulated_question": ""}
+            elif '"relevant": true' in lower_content or '"relevant":true' in lower_content:
+                logger.info("[AI-POST] Extracted relevant=true from text")
+                return {"relevant": True, "reason": "Extracted from text (JSON parse failed)", "reformulated_question": ""}
+            
+            # Ultimate fallback - default to True untuk tidak memblok user
+            logger.warning("[AI-POST] Could not extract relevant status, defaulting to True")
+            return {"relevant": True, "reason": "JSON parse gagal", "reformulated_question": ""}
 
         # Truncate reformulated question
         reformulated_text = (parsed_result.get("reformulated_question") or "").strip()
         if len(reformulated_text.split()) > 12:
             parsed_result["reformulated_question"] = " ".join(reformulated_text.split()[:12]) + "..."
 
-        logger.info(f"[AI-POST] Relevance: {parsed_result.get('relevant')}")
+        logger.info(f"[AI-POST] Relevance result: relevant={parsed_result.get('relevant')}, reason={parsed_result.get('reason', '-')[:50]}")
         return parsed_result
 
     except (ConnectionError, Timeout) as e:
         logger.error(f"[AI-POST] Connection error: {e}")
-        return {"relevant": True, "reason": f"LLM error: {e}", "reformulated_question": ""}
+        return {"relevant": True, "reason": f"LLM connection error", "reformulated_question": ""}
 
     except Exception as e:
         logger.exception(f"[AI-POST] Exception: {e}")
-        return {"relevant": True, "reason": f"Error: {e}", "reformulated_question": ""}
+        return {"relevant": True, "reason": f"Error: {str(e)[:50]}", "reformulated_question": ""}
 
 
 def ai_pre_filter_usulan(user_input: str) -> Dict[str, str]:
