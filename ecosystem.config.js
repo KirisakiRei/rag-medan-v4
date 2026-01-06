@@ -14,13 +14,20 @@
  */
 
 const path = require('path');
+const os = require('os');
+
+// Detect OS and set correct Python path
+const isWindows = os.platform() === 'win32';
+const pythonPath = isWindows 
+  ? path.join(__dirname, '.venv', 'Scripts', 'python.exe')
+  : path.join(__dirname, '.venv', 'bin', 'python');
 
 module.exports = {
   apps: [
     // ============== ORCHESTRATOR ==============
     {
       name: "orchestrator",
-      script: path.join(__dirname, ".venv", "Scripts", "python.exe"),
+      script: pythonPath,
       args: "-m uvicorn orchestrator.orchestrator:app --host 0.0.0.0 --port 5001",
       cwd: __dirname,
       interpreter: "none",
@@ -41,7 +48,7 @@ module.exports = {
     // ============== RAG TEXT SERVICE ==============
     {
       name: "rag-text",
-      script: path.join(__dirname, ".venv", "Scripts", "python.exe"),
+      script: pythonPath,
       args: "-m uvicorn services.rag_text.main:app --host 0.0.0.0 --port 5010",
       cwd: __dirname,
       interpreter: "none",
@@ -62,7 +69,7 @@ module.exports = {
     // ============== RAG DOCUMENT SERVICE ==============
     {
       name: "rag-document",
-      script: path.join(__dirname, ".venv", "Scripts", "python.exe"),
+      script: pythonPath,
       args: "-m uvicorn services.rag_document.main:app --host 0.0.0.0 --port 5011",
       cwd: __dirname,
       interpreter: "none",
@@ -83,7 +90,7 @@ module.exports = {
     // ============== RAG WEB SERVICE ==============
     {
       name: "rag-web",
-      script: path.join(__dirname, ".venv", "Scripts", "python.exe"),
+      script: pythonPath,
       args: "-m uvicorn services.rag_web.main:app --host 0.0.0.0 --port 5012",
       cwd: __dirname,
       interpreter: "none",
@@ -104,7 +111,7 @@ module.exports = {
     // ============== RAG USULAN SERVICE ==============
     {
       name: "rag-usulan",
-      script: path.join(__dirname, ".venv", "Scripts", "python.exe"),
+      script: pythonPath,
       args: "-m uvicorn services.rag_usulan.main:app --host 0.0.0.0 --port 5013",
       cwd: __dirname,
       interpreter: "none",
