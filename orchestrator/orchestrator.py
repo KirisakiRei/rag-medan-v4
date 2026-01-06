@@ -653,7 +653,8 @@ async def unified_search(request: SearchRequest):
             }
         }
         
-        logger.info(f"[RESULT] LOW_CONFIDENCE | best_source={source} | score={top_candidate.get('final_score', 0):.4f if top_candidate else 0} | checked={candidates_checked} | total: {total_duration:.3f}s")
+        best_score = top_candidate.get('final_score', 0) if top_candidate else 0
+        logger.info(f"[RESULT] LOW_CONFIDENCE | best_source={source} | score={best_score:.4f} | checked={candidates_checked} | total: {total_duration:.3f}s")
         return JSONResponse(status_code=200, content=response_payload)
 
 
