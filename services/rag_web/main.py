@@ -25,7 +25,7 @@ from shared.logging_config import setup_logging
 from services.rag_web import search as search_module
 from services.rag_web import sync as sync_module
 from services.rag_web.models import (
-    SearchRequest, TriggerRequest, SyncRequest, 
+    SearchRequest, UnifiedSearchRequest, TriggerRequest, SyncRequest, 
     DeleteRequest, GetContentRequest
 )
 
@@ -151,12 +151,31 @@ async def health_check():
 
 @app.post("/internal/search")
 async def internal_search(request: SearchRequest):
-    """Internal search endpoint - dipanggil oleh orchestrator."""
+    """Internal search endpoint - dipanggil oleh orchestrator (direct mode)."""
     logger.info(f"[SEARCH] Query: {request.query[:50]}...")
     
     result = await search_module.search_web_bank(
-        query=request.query,
+        question=request.query,  # search_web_bank expects 'question' parameter
         limit=request.limit
+    )
+    
+    return JSONResponse(status_code=200, content=result)
+
+
+@app.post("/internal/search-unified")
+async def internal_search_unified(request: UnifiedSearchRequest):
+    """
+    Internal search endpoint untuk unified/parallel mode.
+    Dipanggil oleh orchestrator saat /api/search.
+    Return format sama dengan text service untuk selection.
+    """
+    logger.info(f"[SEARCH-UNIFIED] Question: {request.question[:50]}...")
+    
+    result = await search_module.search_web_unified(
+        question=request.question,
+        original_question=request.original_question,
+        wa_number=request.wa_number,
+        top_k=request.top_k
     )
     
     return JSONResponse(status_code=200, content=result)

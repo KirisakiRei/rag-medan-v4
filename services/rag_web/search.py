@@ -16,6 +16,7 @@ from qdrant_client.http import models as qdrant_models
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from config import config
+# REMOVED: ai_check_relevance - post-filter sekarang di orchestrator
 
 logger = logging.getLogger("rag_web.search")
 
@@ -208,3 +209,167 @@ def _build_error_response(
             "total_sec": 0.0
         }
     }
+
+
+async def search_web_unified(
+    question: str,
+    original_question: str,
+    wa_number: str = "unknown",
+    top_k: int = 3,
+    score_threshold: float = 0.5
+) -> Dict[str, Any]:
+    """
+    Search di web_scraping_bank untuk unified/parallel mode.
+    
+    PERUBAHAN ARSITEKTUR (Option B):
+    - TIDAK ada AI relevance check di sini
+    - Return top_k hasil dengan scoring yang memenuhi threshold
+    - AI relevance check dilakukan HANYA di orchestrator
+    - Service ini hanya bertanggung jawab: query → score → return candidates
+    
+    LOGIC:
+    1. Embed query
+    2. Query ke web_scraping_bank
+    3. Filter by score threshold >= 0.5
+    4. Return top_k results dengan content_for_check untuk orchestrator
+    """
+    start_time = time.time()
+    
+    logger.info(f"[UNIFIED] Search web: {question[:50]}...")
+
+    try:
+        # 1. Embed query
+        embedding_start = time.time()
+        final_question = question.strip().rstrip("?").strip()
+        query_embedding = model.encode(final_question, convert_to_numpy=True).tolist()
+        embedding_duration = time.time() - embedding_start
+
+        # 2. Query ke Qdrant dengan filter is_deleted=False
+        qdrant_start = time.time()
+        results = await qdrant.search(
+            collection_name=config.COLLECTION_WEB,
+            query_vector=query_embedding,
+            query_filter=qdrant_models.Filter(
+                must=[
+                    qdrant_models.FieldCondition(
+                        key="is_deleted",
+                        match=qdrant_models.MatchValue(value=False)
+                    )
+                ]
+            ),
+            limit=top_k * 2,  # Fetch lebih banyak untuk filtering
+            score_threshold=score_threshold
+        )
+        qdrant_duration = time.time() - qdrant_start
+
+        # Tidak ada hasil
+        if not results:
+            total_duration = time.time() - start_time
+            logger.info("[UNIFIED] No web results found above threshold")
+            return {
+                "status": "no_results",
+                "message": "Tidak ada hasil dari web_scraping_bank",
+                "source": "web_scraping",
+                "data": {
+                    "results": [],
+                    "count": 0,
+                    "metadata": {
+                        "wa_number": wa_number,
+                        "original_question": original_question,
+                        "final_question": final_question,
+                        "score_threshold": score_threshold
+                    }
+                },
+                "timing": {
+                    "embedding_sec": round(embedding_duration, 3),
+                    "qdrant_sec": round(qdrant_duration, 3),
+                    "total_sec": round(total_duration, 3)
+                }
+            }
+
+        # 3. Build scored results - TIDAK ada AI check
+        scored_results = []
+        
+        for idx, hit in enumerate(results[:top_k]):  # Limit to top_k
+            payload = hit.payload
+            score = float(hit.score)
+            web_content = payload.get("content", "")
+            
+            # Web info untuk metadata
+            web_info = {
+                "url": payload.get("url", ""),
+                "title": payload.get("title", ""),
+                "link_id": payload.get("link_id", "")
+            }
+            
+            # Determine note based on score
+            if score >= 0.7:
+                note = "web_high_confidence"
+            elif score >= 0.6:
+                note = "web_good_confidence"
+            else:
+                note = "web_moderate_confidence"
+            
+            result_item = {
+                "source": "web_scraping",
+                "rank": idx + 1,
+                "question": web_info.get("title", "-"),
+                "answer_doc": web_content,
+                "dense_score": round(score, 4),
+                "overlap_score": 0.0,  # Web tidak punya overlap
+                "final_score": round(score, 4),
+                "note": note,
+                # Content untuk AI check di orchestrator (limit 2000 chars)
+                "content_for_check": web_content[:2000] if len(web_content) > 2000 else web_content,
+                # Web-specific metadata
+                "web_info": web_info
+            }
+            
+            scored_results.append(result_item)
+            logger.info(f"[UNIFIED] Web #{idx+1}: score={score:.4f} | url={web_info.get('url', '-')[:50]}...")
+
+        total_duration = time.time() - start_time
+        
+        # 4. Return candidates untuk orchestrator
+        logger.info(f"[UNIFIED] Web returning {len(scored_results)} candidates for orchestrator evaluation")
+        
+        return {
+            "status": "has_candidates",
+            "message": f"Found {len(scored_results)} web candidates",
+            "source": "web_scraping",
+            "data": {
+                "results": scored_results,
+                "count": len(scored_results),
+                "metadata": {
+                    "wa_number": wa_number,
+                    "original_question": original_question,
+                    "final_question": final_question,
+                    "score_threshold": score_threshold,
+                    "top_score": scored_results[0]["final_score"] if scored_results else 0
+                }
+            },
+            "timing": {
+                "embedding_sec": round(embedding_duration, 3),
+                "qdrant_sec": round(qdrant_duration, 3),
+                "total_sec": round(total_duration, 3)
+            }
+        }
+
+    except Exception as e:
+        logger.exception(f"[UNIFIED] Web search error: {e}")
+        return {
+            "status": "error",
+            "message": str(e),
+            "source": "web_scraping",
+            "data": {
+                "results": [],
+                "count": 0,
+                "metadata": {
+                    "wa_number": wa_number,
+                    "original_question": original_question,
+                    "final_question": question,
+                    "error": str(e)
+                }
+            },
+            "timing": {"total_sec": round(time.time() - start_time, 3)}
+        }

@@ -23,7 +23,7 @@ from shared.logging_config import setup_logging
 # Import modules
 from services.rag_text import search as search_module
 from services.rag_text import sync as sync_module
-from services.rag_text.models import SearchRequest, SyncRequest
+from services.rag_text.models import SearchRequest, UnifiedSearchRequest, SyncRequest
 
 # Setup logging
 logger = setup_logging("rag_text")
@@ -136,14 +136,39 @@ async def health_check():
 @app.post("/internal/search")
 async def internal_search(request: SearchRequest):
     """
-    Internal search endpoint - dipanggil oleh orchestrator.
+    Internal search endpoint - dipanggil oleh orchestrator (direct mode).
     TIDAK ada fallback - hanya search di knowledge_bank.
+    
+    Jika skip_prefilter=True, pre-filter sudah dilakukan di orchestrator
+    dan question adalah clean_question.
     """
-    logger.info(f"[SEARCH] Question: {request.question[:50]}...")
+    logger.info(f"[SEARCH] Question: {request.question[:50]}... | skip_prefilter: {request.skip_prefilter}")
     
     result = await search_module.search_knowledge_bank(
         question=request.question,
-        wa_number=request.wa_number
+        wa_number=request.wa_number,
+        original_question=request.original_question,
+        skip_prefilter=request.skip_prefilter
+    )
+    
+    return JSONResponse(status_code=200, content=result)
+
+
+@app.post("/internal/search-unified")
+async def internal_search_unified(request: UnifiedSearchRequest):
+    """
+    Internal search endpoint untuk unified/parallel mode.
+    Dipanggil oleh orchestrator saat /api/search.
+    Return format: kandidat dengan scoring untuk post-filter di orchestrator.
+    """
+    logger.info(f"[SEARCH-UNIFIED] Question: {request.question[:50]}...")
+    
+    result = await search_module.search_knowledge_bank(
+        question=request.question,
+        wa_number=request.wa_number,
+        original_question=request.original_question,
+        skip_prefilter=True,  # Sudah di-prefilter di orchestrator
+        top_k=request.top_k
     )
     
     return JSONResponse(status_code=200, content=result)

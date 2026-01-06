@@ -17,6 +17,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 from config import config
 from shared.summarizer_utils import summarize_text
+from shared.utils import format_for_display
+# REMOVED: ai_check_relevance - post-filter sekarang di orchestrator
 
 logger = logging.getLogger("rag_document.search")
 
@@ -133,4 +135,190 @@ async def search_document_bank(
             "status": "error",
             "message": str(e),
             "results": []
+        }
+
+
+async def search_document_unified(
+    question: str,
+    original_question: str,
+    wa_number: str = "unknown",
+    top_k: int = 3
+) -> Dict[str, Any]:
+    """
+    Search di document_bank untuk unified/parallel mode.
+    
+    V3 CHANGES:
+    - TIDAK ada AI relevance check di sini (pindah ke orchestrator)
+    - Return TOP 3 scored results untuk orchestrator aggregate
+    - Threshold lebih rendah (0.4) karena AI check di orchestrator
+    
+    Args:
+        question: Clean question dari orchestrator
+        original_question: Pertanyaan asli user
+        wa_number: Nomor WhatsApp
+        top_k: Jumlah top results untuk return
+    """
+    start_time = time.time()
+    
+    logger.info(f"[DOC-SEARCH] Question: {question[:50]}...")
+
+    try:
+        # 1. Embed query
+        embedding_start = time.time()
+        query_vector = embed_query(model, question)
+        embedding_duration = time.time() - embedding_start
+
+        # 2. Query ke Qdrant dengan filter is_deleted=False
+        qdrant_start = time.time()
+        qdrant_hits = await qdrant.query_points(
+            collection_name=config.COLLECTION_DOCUMENT,
+            query=query_vector,
+            query_filter=qdrant_models.Filter(
+                must=[qdrant_models.FieldCondition(key="is_deleted", match=qdrant_models.MatchValue(value=False))]
+            ),
+            limit=limit
+        )
+        qdrant_duration = time.time() - qdrant_start
+
+        result_points = getattr(qdrant_hits, "points", None) or getattr(qdrant_hits, "result", None) or qdrant_hits
+
+        # Tidak ada hasil
+        if not result_points:
+            total_duration = time.time() - start_time
+            logger.info("[DOC-SEARCH] No document results")
+            return {
+                "status": "empty",
+                "message": "No results from document_bank",
+                "source": "document",
+                "data": {
+                    "results": [],
+                    "total_found": 0,
+                    "metadata": {
+                        "wa_number": wa_number,
+                        "original_question": original_question,
+                        "final_question": question,
+                        "category": "Dokumen"
+                    }
+                },
+                "timing": {
+                    "embedding_sec": round(embedding_duration, 3),
+                    "qdrant_sec": round(qdrant_duration, 3),
+                    "total_sec": round(total_duration, 3)
+                }
+            }
+
+        # 3. Process results - NO AI CHECK, just scoring
+        scored_results = []
+        
+        for hit in result_points:
+            result_item = hit[0] if isinstance(hit, tuple) else hit
+            payload = getattr(result_item, "payload", {}) or result_item.get("payload", {})
+            score = float(getattr(result_item, "score", 0.0))
+            document_text = payload.get("text", "")
+            
+            # Threshold check (lebih rendah, orchestrator yang final decide)
+            if score >= 0.4 and document_text:
+                # Determine acceptance note
+                if score >= 0.85:
+                    note = "high_score"
+                elif score >= 0.70:
+                    note = "good_score"
+                else:
+                    note = "marginal"
+                
+                scored_results.append({
+                    "source": "document",
+                    "question": "-",
+                    "question_rag_name": "-",
+                    "answer_id": None,
+                    "answer_doc": format_for_display(document_text),
+                    "category_id": None,
+                    "dense_score": round(score, 3),
+                    "overlap_score": 0.0,
+                    "final_score": round(score, 3),
+                    "note": note,
+                    # Content untuk AI relevance check di orchestrator
+                    "content_for_check": document_text[:2000],  # Limit untuk AI check
+                    # Document metadata
+                    "document_info": {
+                        "filename": payload.get("filename", "-"),
+                        "page_number": payload.get("page_number", "-"),
+                        "opd": payload.get("opd", "-"),
+                        "doc_id": payload.get("mysql_id", "-")
+                    }
+                })
+        
+        # Sort by score descending
+        scored_results = sorted(scored_results, key=lambda x: x["final_score"], reverse=True)
+        
+        # Take top K
+        top_results = scored_results[:top_k]
+        
+        # Log results
+        logger.info(f"[DOC-SEARCH] Found {len(scored_results)} results, returning top {len(top_results)}")
+        for i, r in enumerate(top_results):
+            logger.info(f"  [{i+1}] {r['document_info']['filename']} p.{r['document_info']['page_number']} | score={r['final_score']:.3f}")
+
+        total_duration = time.time() - start_time
+
+        if top_results:
+            return {
+                "status": "has_candidates",
+                "message": f"Found {len(top_results)} document candidates",
+                "source": "document",
+                "data": {
+                    "results": top_results,
+                    "count": len(top_results),
+                    "metadata": {
+                        "wa_number": wa_number,
+                        "original_question": original_question,
+                        "final_question": question,
+                        "category": "Dokumen"
+                    }
+                },
+                "timing": {
+                    "embedding_sec": round(embedding_duration, 3),
+                    "qdrant_sec": round(qdrant_duration, 3),
+                    "total_sec": round(total_duration, 3)
+                }
+            }
+        else:
+            return {
+                "status": "no_results",
+                "message": "No document results found above threshold",
+                "source": "document",
+                "data": {
+                    "results": [],
+                    "count": 0,
+                    "metadata": {
+                        "wa_number": wa_number,
+                        "original_question": original_question,
+                        "final_question": question,
+                        "category": "Dokumen"
+                    }
+                },
+                "timing": {
+                    "embedding_sec": round(embedding_duration, 3),
+                    "qdrant_sec": round(qdrant_duration, 3),
+                    "total_sec": round(total_duration, 3)
+                }
+            }
+
+    except Exception as e:
+        logger.exception(f"[DOC-SEARCH] Error: {e}")
+        return {
+            "status": "error",
+            "message": str(e),
+            "source": "document",
+            "data": {
+                "results": [],
+                "count": 0,
+                "metadata": {
+                    "wa_number": wa_number,
+                    "original_question": original_question,
+                    "final_question": question,
+                    "category": "Dokumen"
+                }
+            },
+            "timing": {"total_sec": round(time.time() - start_time, 3)}
         }

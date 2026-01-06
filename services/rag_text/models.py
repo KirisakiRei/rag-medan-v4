@@ -12,6 +12,16 @@ class SearchRequest(BaseModel):
     """Request dari orchestrator untuk search."""
     question: str
     wa_number: str = "unknown"
+    original_question: Optional[str] = None  # Pertanyaan asli user (jika dari orchestrator)
+    skip_prefilter: bool = False  # Skip pre-filter jika sudah dilakukan di orchestrator
+
+
+class UnifiedSearchRequest(BaseModel):
+    """Request dari orchestrator untuk unified search (parallel mode)."""
+    question: str  # Clean question dari orchestrator
+    original_question: str  # Pertanyaan asli user
+    wa_number: str = "unknown"
+    top_k: int = 3  # Number of candidates to return
 
 
 class SyncRequest(BaseModel):

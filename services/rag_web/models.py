@@ -14,6 +14,14 @@ class SearchRequest(BaseModel):
     limit: int = 5
 
 
+class UnifiedSearchRequest(BaseModel):
+    """Request dari orchestrator untuk unified search (parallel mode)."""
+    question: str  # Clean question dari orchestrator
+    original_question: str  # Pertanyaan asli user
+    wa_number: str = "unknown"
+    top_k: int = 3  # Number of candidates to return
+
+
 class TriggerRequest(BaseModel):
     """Request untuk trigger scraping."""
     link_id: str = Field(..., description="Unique ID dari link")

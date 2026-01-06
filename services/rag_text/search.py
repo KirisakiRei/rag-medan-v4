@@ -1,8 +1,8 @@
 """
-RAG Text Service - Search Module
+RAG Text Service - Search Module (V3 - Orchestrator Post-Filter)
 Logic pencarian di knowledge_bank
-TANPA fallback - hanya search di knowledge_bank
-PAYLOAD DAN SCORING HARUS PERSIS SEPERTI V2!
+TANPA AI RELEVANCE CHECK - Post-filter dilakukan di Orchestrator
+Return TOP 3 scored results untuk orchestrator aggregate
 """
 import os
 import sys
@@ -24,7 +24,7 @@ from shared.utils import (
     detect_category,
     safe_parse_answer_id,
 )
-from shared.filtering import ai_pre_filter, ai_check_relevance
+from shared.filtering import ai_pre_filter  # ONLY pre-filter, NO ai_check_relevance
 
 logger = logging.getLogger("rag_text.search")
 
@@ -43,71 +43,95 @@ def set_instances(embedding_model: SentenceTransformer, qdrant_client: AsyncQdra
 async def search_knowledge_bank(
     question: str,
     wa_number: str = "unknown",
-    limit: int = 5
+    limit: int = 5,
+    original_question: str = None,
+    skip_prefilter: bool = False,
+    top_k: int = 3  # Return top K results untuk orchestrator
 ) -> Dict[str, Any]:
     """
     Search di knowledge_bank.
-    TIDAK ada fallback - hanya search di collection ini.
-    PAYLOAD DAN SCORING PERSIS SEPERTI V2!
+    
+    V3 CHANGES:
+    - TIDAK ada AI relevance check di sini (pindah ke orchestrator)
+    - Return TOP 3 scored results untuk orchestrator aggregate
+    - Scoring threshold tetap (dense >= threshold untuk basic filter)
+    
+    Args:
+        question: Pertanyaan user (atau clean_question jika dari orchestrator)
+        wa_number: Nomor WhatsApp user
+        limit: Jumlah hasil dari Qdrant
+        original_question: Pertanyaan asli user (jika skip_prefilter=True)
+        skip_prefilter: Jika True, skip AI pre-filter (sudah dilakukan di orchestrator)
+        top_k: Jumlah top results untuk return ke orchestrator
     
     Returns:
-        Dict dengan format v2-compatible response
+        Dict dengan scored results untuk orchestrator
     """
     start_time = time.time()
     user_question = (question or "").strip()
     whatsapp_number = wa_number
+    
+    # Jika dipanggil dari orchestrator dengan skip_prefilter=True,
+    # question sudah clean, dan original_question adalah pertanyaan asli
+    if skip_prefilter and original_question:
+        display_question = original_question
+    else:
+        display_question = user_question
 
     if not user_question:
         return {
             "status": "error",
-            "message": "Field 'question' wajib diisi"
+            "message": "Field 'question' wajib diisi",
+            "source": "text"
         }
 
-    logger.info(f"[USER-QUESTION] Pertanyaan User: {user_question}")
+    logger.info(f"[TEXT-SEARCH] Question: {display_question[:50]}...")
 
     # =====================================================
-    # 1. AI Pre-Filter (PERSIS V2)
+    # 1. AI Pre-Filter (SKIP JIKA DARI ORCHESTRATOR)
     # =====================================================
     pre_filter_start = time.time()
-    pre_filter_result = ai_pre_filter(user_question)
-    pre_filter_duration = time.time() - pre_filter_start
+    pre_filter_duration = 0.0
+    
+    if skip_prefilter:
+        logger.info("[PRE-FILTER] Skipped (handled by orchestrator)")
+        pre_filter_result = {"valid": True, "clean_question": user_question}
+    else:
+        pre_filter_result = ai_pre_filter(user_question)
+        pre_filter_duration = time.time() - pre_filter_start
 
-    # Jika tidak valid dari pre-filter
-    if not pre_filter_result.get("valid", True):
-        total_duration = time.time() - start_time
-        return {
-            "status": "low_confidence",
-            "message": pre_filter_result.get("reason", "Pertanyaan tidak relevan"),
-            "data": {
-                "similar_questions": [],
-                "metadata": {
-                    "wa_number": whatsapp_number,
-                    "original_question": user_question,
-                    "final_question": "-",
-                    "category": "-",
-                    "ai_reason": pre_filter_result.get("reason", "-"),
-                    "ai_reformulated": "-",
-                    "final_score_top": "-"
+        if not pre_filter_result.get("valid", True):
+            total_duration = time.time() - start_time
+            return {
+                "status": "low_confidence",
+                "message": pre_filter_result.get("reason", "Pertanyaan tidak relevan"),
+                "source": "text",
+                "data": {
+                    "results": [],
+                    "metadata": {
+                        "wa_number": whatsapp_number,
+                        "original_question": display_question,
+                        "final_question": "-",
+                        "category": "-"
+                    }
+                },
+                "timing": {
+                    "ai_domain_sec": round(pre_filter_duration, 3),
+                    "embedding_sec": 0.0,
+                    "qdrant_sec": 0.0,
+                    "total_sec": round(total_duration, 3)
                 }
-            },
-            "timing": {
-                "ai_domain_sec": round(pre_filter_duration, 3),
-                "ai_relevance_sec": 0.0,
-                "embedding_sec": 0.0,
-                "qdrant_sec": 0.0,
-                "total_sec": round(total_duration, 3)
             }
-        }
 
     # =====================================================
-    # 2. Normalize question dan detect category (PERSIS V2)
+    # 2. Normalize question dan detect category
     # =====================================================
     normalized_question = normalize_text(clean_location_terms(pre_filter_result.get("clean_question", user_question)))
     detected_category = detect_category(normalized_question)
     category_id = detected_category["id"] if detected_category else None
 
     # =====================================================
-    # 3. Embedding & Query Qdrant (PERSIS V2)
+    # 3. Embedding & Query Qdrant
     # =====================================================
     embedding_start = time.time()
     query_vector = model.encode("query: " + normalized_question).tolist()
@@ -129,125 +153,113 @@ async def search_knowledge_bank(
     )
     qdrant_duration = time.time() - qdrant_start
 
-    # Log kandidat hasil
-    try:
-        if qdrant_results:
-            logger.info("[RAG-SEARCH] Kandidat Hasil Pencarian Awal")
-            for index, hit in enumerate(qdrant_results[:3], start=1):
-                rag_question = (hit.payload.get("question_rag_name") or "-").strip()
-                dense_score = float(getattr(hit, "score", 0.0))
-                answer_id = safe_parse_answer_id(hit.payload.get("answer_id"))
-                category_id_hit = hit.payload.get("category_id", "-")
-
-                overlap_score = keyword_overlap(normalized_question, rag_question)
-                # PERSIS V2: Final score = 0.65 * dense + 0.35 * overlap
-                final_score = round((0.65 * dense_score) + (0.35 * overlap_score), 3)
-
-                logger.info(
-                    f"[{index}] Question: {rag_question} | Dense: {dense_score:.3f} | Overlap: {overlap_score:.3f} | Final: {final_score:.3f}"
-                )
-        else:
-            logger.warning("[RAG-SEARCH] Tidak ada hasil dari Qdrant.")
-    except Exception as e:
-        logger.error(f"[RAG-SEARCH] Gagal mencetak hasil pencarian awal: {e}")
-
     # =====================================================
-    # 4. AI Relevance Check (PERSIS V2)
+    # 4. Scoring Logic (TANPA AI Relevance Check!)
     # =====================================================
-    relevance_check_start = time.time()
-    relevance_result = {}
-    if qdrant_results:
-        relevance_result = ai_check_relevance(user_question, qdrant_results[0].payload["question_rag_name"])
-    relevance_check_duration = time.time() - relevance_check_start
-
-    # =====================================================
-    # 5. Scoring Logic (PERSIS V2!)
-    # =====================================================
-    accepted_results, rejected_results = [], []
+    scored_results = []
+    
     for hit in qdrant_results:
         dense_score = float(hit.score)
-        overlap_score = keyword_overlap(normalized_question, hit.payload["question_rag_name"])
-        # PERSIS V2: Final score = 0.65 * dense + 0.35 * overlap
-        final_score = round((0.65 * dense_score) + (0.35 * overlap_score), 3)
-
-        acceptance_note, is_accepted = "-", False
+        rag_question = hit.payload.get("question_rag_name", "")
+        overlap_score = keyword_overlap(normalized_question, rag_question)
         
-        # SCORING LOGIC PERSIS V2:
-        # 1. Auto accept jika dense >= 0.90
+        # Final score = 0.65 * dense + 0.35 * overlap (PERSIS V2)
+        final_score = round((0.65 * dense_score) + (0.35 * overlap_score), 3)
+        
+        # Basic threshold filter (lebih rendah karena AI check di orchestrator)
+        # Kita kirim semua yang punya potential, orchestrator yang decide
+        acceptance_note = "-"
+        passes_threshold = False
+        
+        # Threshold logic (sama seperti V2 tapi tanpa AI check)
         if dense_score >= 0.90:
-            is_accepted, acceptance_note = True, "auto_accepted_by_dense"
-        # 2. Accept jika dense 0.86-0.89 DAN overlap >= 0.25
-        elif 0.86 <= dense_score <= 0.89 and overlap_score >= 0.25:
-            is_accepted, acceptance_note = True, "accepted_by_overlap"
+            passes_threshold = True
+            acceptance_note = "high_dense"
+        elif dense_score >= 0.86 and overlap_score >= 0.25:
+            passes_threshold = True
+            acceptance_note = "good_overlap"
+        elif dense_score >= 0.83 and overlap_score >= 0.15:
+            # Ini yang sebelumnya butuh AI check, sekarang kirim ke orchestrator
+            passes_threshold = True
+            acceptance_note = "needs_ai_check"
+        elif dense_score >= 0.80:
+            # Lower threshold, let orchestrator decide
+            passes_threshold = True
+            acceptance_note = "marginal"
+        
+        if passes_threshold:
+            scored_results.append({
+                "source": "text",
+                "question": hit.payload.get("question", ""),
+                "question_rag_name": rag_question,
+                "answer_id": safe_parse_answer_id(hit.payload.get("answer_id")),
+                "answer_doc": "",
+                "category_id": hit.payload.get("category_id"),
+                "dense_score": dense_score,
+                "overlap_score": overlap_score,
+                "final_score": final_score,
+                "note": acceptance_note,
+                # Content untuk AI relevance check di orchestrator
+                "content_for_check": rag_question
+            })
 
-        # 3. Accept by AI relevance jika dense >= 0.83 DAN overlap >= 0.15 DAN AI bilang relevant
-        try:
-            if not is_accepted and dense_score >= 0.83 and overlap_score >= 0.15 and relevance_result.get("relevant", False):
-                is_accepted, acceptance_note = True, "accepted_by_ai_relevance"
-        except Exception:
-            pass
-
-        # PAYLOAD RESULT PERSIS V2:
-        result_item = {
-            "question": hit.payload["question"],
-            "question_rag_name": hit.payload["question_rag_name"],
-            "answer_id": safe_parse_answer_id(hit.payload.get("answer_id")),
-            "answer_doc": "",
-            "category_id": hit.payload.get("category_id"),
-            "dense_score": dense_score,
-            "overlap_score": overlap_score,
-            "final_score": final_score,
-            "note": acceptance_note
-        }
-        (accepted_results if is_accepted else rejected_results).append(result_item)
-
-    # Sort results
-    accepted_results = sorted(accepted_results, key=lambda x: x["final_score"], reverse=True)
-    rejected_results = sorted(rejected_results, key=lambda x: x["final_score"], reverse=True)
-
-    # Cek AI relevance
-    is_question_relevant = relevance_result.get("relevant", True)
-    if not is_question_relevant:
-        logger.info("[AI-POST] Pertanyaan dinilai TIDAK relevan oleh model relevance-check.")
-        accepted_results = []
-
-    if accepted_results:
-        final_rag_output = accepted_results[0]["question_rag_name"]
-    else:
-        final_rag_output = "-"
-
-    logger.info(f"[AI-POST] Output akan dikirim ke WABOT: '{final_rag_output}'")
+    # Sort by final_score descending
+    scored_results = sorted(scored_results, key=lambda x: x["final_score"], reverse=True)
+    
+    # Take top K
+    top_results = scored_results[:top_k]
+    
+    # Log results
+    logger.info(f"[TEXT-SEARCH] Found {len(scored_results)} results, returning top {len(top_results)}")
+    for i, r in enumerate(top_results):
+        logger.info(f"  [{i+1}] {r['question_rag_name'][:50]}... | dense={r['dense_score']:.3f} | overlap={r['overlap_score']:.3f} | final={r['final_score']:.3f}")
 
     total_duration = time.time() - start_time
 
     # =====================================================
-    # 6. RESPONSE PAYLOAD PERSIS V2!
+    # 5. RESPONSE - Return scored results untuk orchestrator
     # =====================================================
-    response_payload = {
-        "status": "success" if accepted_results else "low_confidence",
-        "message": "Hasil ditemukan" if accepted_results else "Tidak ada hasil cukup relevan",
-        "source": "text",
-        "data": {
-            "similar_questions": accepted_results if accepted_results else rejected_results,
-            "metadata": {
-                "wa_number": whatsapp_number,
-                "original_question": user_question,
-                "final_question": normalized_question,
-                "category": (detected_category["name"] if detected_category else "Global"),
-                "ai_reason": relevance_result.get("reason", "-") if relevance_result else "-",
-                "ai_reformulated": relevance_result.get("reformulated_question", "-") if relevance_result else "-",
-                "final_score_top": (accepted_results[0]["final_score"] if accepted_results else "-")
+    if top_results:
+        return {
+            "status": "has_candidates",
+            "message": f"Found {len(top_results)} text candidates",
+            "source": "text",
+            "data": {
+                "results": top_results,
+                "count": len(top_results),
+                "metadata": {
+                    "wa_number": whatsapp_number,
+                    "original_question": display_question,
+                    "final_question": normalized_question,
+                    "category": detected_category["name"] if detected_category else "Global"
+                }
+            },
+            "timing": {
+                "ai_domain_sec": round(pre_filter_duration, 3),
+                "embedding_sec": round(embedding_duration, 3),
+                "qdrant_sec": round(qdrant_duration, 3),
+                "total_sec": round(total_duration, 3)
             }
-        },
-        "timing": {
-            "ai_domain_sec": round(pre_filter_duration, 3),
-            "ai_relevance_sec": round(relevance_check_duration, 3),
-            "embedding_sec": round(embedding_duration, 3),
-            "qdrant_sec": round(qdrant_duration, 3),
-            "total_sec": round(total_duration, 3)
         }
-    }
-
-    logger.info(f"[REQUEST] Total waktu: {total_duration:.3f} detik")
-
-    return response_payload
+    else:
+        return {
+            "status": "no_results",
+            "message": "No text results found above threshold",
+            "source": "text",
+            "data": {
+                "results": [],
+                "count": 0,
+                "metadata": {
+                    "wa_number": whatsapp_number,
+                    "original_question": display_question,
+                    "final_question": normalized_question,
+                    "category": detected_category["name"] if detected_category else "Global"
+                }
+            },
+            "timing": {
+                "ai_domain_sec": round(pre_filter_duration, 3),
+                "embedding_sec": round(embedding_duration, 3),
+                "qdrant_sec": round(qdrant_duration, 3),
+                "total_sec": round(total_duration, 3)
+            }
+        }
