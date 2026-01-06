@@ -54,19 +54,19 @@ docker run -d -p 6333:6333 -p 6334:6334 qdrant/qdrant
 
 ```bash
 # Terminal 1: Orchestrator (port 5001)
-python -m uvicorn orchestrator.orchestrator:app --host 0.0.0.0 --port 5001 --reload
+.venv\Scripts\activate; python -m uvicorn orchestrator.orchestrator:app --host 0.0.0.0 --port 5001 --reload
 
 # Terminal 2: RAG Text Service (port 5010)
-python -m uvicorn services.rag_text.main:app --host 0.0.0.0 --port 5010 --reload
+.venv\Scripts\activate; python -m uvicorn services.rag_text.main:app --host 0.0.0.0 --port 5010 --reload
 
 # Terminal 3: RAG Document Service (port 5011)
-python -m uvicorn services.rag_document.main:app --host 0.0.0.0 --port 5011 --reload
+.venv\Scripts\activate; python -m uvicorn services.rag_document.main:app --host 0.0.0.0 --port 5011 --reload
 
 # Terminal 4: RAG Usulan Service (port 5013)
-python -m uvicorn services.rag_usulan.main:app --host 0.0.0.0 --port 5013 --reload
+.venv\Scripts\activate; python -m uvicorn services.rag_usulan.main:app --host 0.0.0.0 --port 5013 --reload
 
 # Terminal 5: RAG Web Service (port 5012)
-python -m uvicorn services.rag_web.main:app --host 0.0.0.0 --port 5012 --reload
+.venv\Scripts\activate; python -m uvicorn services.rag_web.main:app --host 0.0.0.0 --port 5012 --reload
 ```
 
 Atau gunakan PM2:
@@ -136,25 +136,25 @@ curl -X POST http://localhost:5001/api/sync \
     "content": [
       {
         "question_rag_id": "550e8400-e29b-41d4-a716-446655440001",
-        "question_id": 1,
-        "answer_id": 1,
-        "category_id": 1,
+        "question_id": "550e8400-e29b-41d4-a716-000000000001",
+        "answer_id": "550e8400-e29b-41d4-a716-aaa000000001",
+        "category_id": "550e8400-e29b-41d4-a716-ccc000000001",
         "question": "Bagaimana cara mengurus KTP?",
         "question_rag_name": "Cara mengurus KTP baru di Kota Medan"
       },
       {
         "question_rag_id": "550e8400-e29b-41d4-a716-446655440002",
-        "question_id": 2,
-        "answer_id": 2,
-        "category_id": 1,
+        "question_id": "550e8400-e29b-41d4-a716-000000000002",
+        "answer_id": "550e8400-e29b-41d4-a716-aaa000000002",
+        "category_id": "550e8400-e29b-41d4-a716-ccc000000001",
         "question": "Syarat membuat KK baru?",
         "question_rag_name": "Persyaratan dan prosedur pembuatan Kartu Keluarga baru"
       },
       {
         "question_rag_id": "550e8400-e29b-41d4-a716-446655440003",
-        "question_id": 3,
-        "answer_id": 3,
-        "category_id": 2,
+        "question_id": "550e8400-e29b-41d4-a716-000000000003",
+        "answer_id": "550e8400-e29b-41d4-a716-aaa000000003",
+        "category_id": "550e8400-e29b-41d4-a716-ccc000000002",
         "question": "Jam operasional kantor Disdukcapil?",
         "question_rag_name": "Jam buka dan tutup pelayanan Disdukcapil Kota Medan"
       }
@@ -178,9 +178,9 @@ curl -X POST http://localhost:5001/api/sync \
     "action": "add",
     "content": {
       "question_rag_id": "550e8400-e29b-41d4-a716-446655440004",
-      "question_id": 4,
-      "answer_id": 4,
-      "category_id": 1,
+      "question_id": "550e8400-e29b-41d4-a716-000000000004",
+      "answer_id": "550e8400-e29b-41d4-a716-aaa000000004",
+      "category_id": "550e8400-e29b-41d4-a716-ccc000000001",
       "question": "Cara membuat akta kelahiran?",
       "question_rag_name": "Prosedur dan syarat pembuatan akta kelahiran anak"
     }
@@ -203,9 +203,9 @@ curl -X POST http://localhost:5001/api/sync \
     "action": "update",
     "content": {
       "question_rag_id": "550e8400-e29b-41d4-a716-446655440001",
-      "question_id": 1,
-      "answer_id": 1,
-      "category_id": 1,
+      "question_id": "550e8400-e29b-41d4-a716-000000000001",
+      "answer_id": "550e8400-e29b-41d4-a716-aaa000000001",
+      "category_id": "550e8400-e29b-41d4-a716-ccc000000001",
       "question": "Bagaimana cara mengurus KTP elektronik?",
       "question_rag_name": "Cara mengurus KTP elektronik (e-KTP) di Kota Medan"
     }
@@ -257,9 +257,9 @@ curl -X POST http://localhost:5001/api/search \
       {
         "question": "Bagaimana cara mengurus KTP elektronik?",
         "question_rag_name": "Cara mengurus KTP elektronik (e-KTP) di Kota Medan",
-        "answer_id": 1,
+        "answer_id": "550e8400-e29b-41d4-a716-aaa000000001",
         "answer_doc": "",
-        "category_id": 1,
+        "category_id": "550e8400-e29b-41d4-a716-ccc000000001",
         "dense_score": 0.912,
         "overlap_score": 0.35,
         "final_score": 0.715,
@@ -428,15 +428,15 @@ curl -X POST http://localhost:5001/api/sync-usulan \
     "content": [
       {
         "request_rag_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
-        "request_id": 101,
-        "organization_id": 5,
+        "request_id": "a1b2c3d4-0000-0000-0000-000000000101",
+        "organization_id": "a1b2c3d4-0000-0000-0000-org000000005",
         "request_name": "Perbaikan jalan berlubang",
         "request_rag_name": "Usulan perbaikan jalan berlubang di Jalan Gatot Subroto Medan"
       },
       {
         "request_rag_id": "b2c3d4e5-f6a7-8901-bcde-f12345678901",
-        "request_id": 102,
-        "organization_id": 3,
+        "request_id": "b2c3d4e5-0000-0000-0000-000000000102",
+        "organization_id": "b2c3d4e5-0000-0000-0000-org000000003",
         "request_name": "Lampu jalan mati",
         "request_rag_name": "Permohonan perbaikan lampu penerangan jalan umum yang mati"
       }
@@ -459,8 +459,8 @@ curl -X POST http://localhost:5001/api/sync-usulan \
     "action": "add",
     "content": {
       "request_rag_id": "c3d4e5f6-a7b8-9012-cdef-123456789012",
-      "request_id": 103,
-      "organization_id": 7,
+      "request_id": "c3d4e5f6-0000-0000-0000-000000000103",
+      "organization_id": "c3d4e5f6-0000-0000-0000-org000000007",
       "request_name": "Banjir di kelurahan",
       "request_rag_name": "Laporan banjir dan permintaan penanganan drainase di Kelurahan Sunggal"
     }
@@ -482,8 +482,8 @@ curl -X POST http://localhost:5001/api/sync-usulan \
     "action": "update",
     "content": {
       "request_rag_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
-      "request_id": 101,
-      "organization_id": 5,
+      "request_id": "a1b2c3d4-0000-0000-0000-000000000101",
+      "organization_id": "a1b2c3d4-0000-0000-0000-org000000005",
       "request_name": "Perbaikan jalan berlubang (URGENT)",
       "request_rag_name": "Usulan URGENT perbaikan jalan berlubang di Jalan Gatot Subroto Medan"
     }
@@ -532,8 +532,8 @@ curl -X POST http://localhost:5001/api/search-usulan \
   "data": {
     "similar_questions": [
       {
-        "request_id": 101,
-        "organization_id": 5,
+        "request_id": "a1b2c3d4-0000-0000-0000-000000000101",
+        "organization_id": "a1b2c3d4-0000-0000-0000-org000000005",
         "request_name": "Perbaikan jalan berlubang (URGENT)",
         "request_rag_name": "Usulan URGENT perbaikan jalan berlubang di Jalan Gatot Subroto Medan",
         "dense_score": 0.892,
@@ -577,7 +577,7 @@ curl -X POST http://localhost:5001/api/search-usulan \
 curl -X POST http://localhost:5001/api/web-trigger \
   -H "Content-Type: application/json" \
   -d '{
-    "link_id": "web-link-uuid-001",
+    "link_id": "f47ac10b-58cc-4372-a567-web000000001",
     "url": "https://pemkomedan.go.id/berita/pengumuman-libur-nasional",
     "metadata": {
       "category": "pengumuman",
@@ -589,7 +589,7 @@ curl -X POST http://localhost:5001/api/web-trigger \
 {
   "status": "processing",
   "message": "Scraping job started",
-  "link_id": "web-link-uuid-001",
+  "link_id": "f47ac10b-58cc-4372-a567-web000000001",
   "job_id": "f47ac10b-58cc-4372-a567-0e02b2c3d479"
 }
 ```
@@ -600,7 +600,7 @@ curl -X POST http://localhost:5001/api/web-trigger \
 curl -X POST http://localhost:5001/api/web-sync \
   -H "Content-Type: application/json" \
   -d '{
-    "link_id": "web-link-uuid-001",
+    "link_id": "f47ac10b-58cc-4372-a567-web000000001",
     "edited_content": "Pengumuman resmi dari Pemerintah Kota Medan tentang libur nasional dan cuti bersama tahun 2026. Tanggal libur: 1 Januari (Tahun Baru), 29 Januari (Imlek), dst..."
   }'
 
@@ -608,7 +608,7 @@ curl -X POST http://localhost:5001/api/web-sync \
 {
   "status": "success",
   "message": "Content synced successfully",
-  "link_id": "web-link-uuid-001",
+  "link_id": "f47ac10b-58cc-4372-a567-web000000001",
   "chunks_count": 3
 }
 ```
@@ -653,7 +653,7 @@ curl -X POST http://localhost:5001/api/web-search \
       "web_info": {
         "url": "https://pemkomedan.go.id/berita/pengumuman-libur-nasional",
         "title": "Pengumuman Libur Nasional 2026",
-        "link_id": "web-link-uuid-001"
+        "link_id": "f47ac10b-58cc-4372-a567-web000000001"
       }
     }
   },
@@ -671,14 +671,14 @@ curl -X POST http://localhost:5001/api/web-search \
 curl -X DELETE http://localhost:5001/api/web-delete \
   -H "Content-Type: application/json" \
   -d '{
-    "link_id": "web-link-uuid-001"
+    "link_id": "f47ac10b-58cc-4372-a567-web000000001"
   }'
 
 # Response:
 {
   "status": "success",
   "message": "Content deleted",
-  "link_id": "web-link-uuid-001",
+  "link_id": "f47ac10b-58cc-4372-a567-web000000001",
   "deleted_chunks": 3
 }
 ```

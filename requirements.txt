@@ -50,3 +50,4 @@ langchain-text-splitters==0.3.4
 
 # ============== UTILITIES ==============
 tqdm==4.67.1
+click==8.1.7

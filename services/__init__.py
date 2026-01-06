@@ -12,4 +12,4 @@ Each service is modular with separate files:
 - search.py: Search functionality
 - sync.py: Sync functionality  
 - models.py: Pydantic models
-- (additional files per service)
+- (additional files per service)"""

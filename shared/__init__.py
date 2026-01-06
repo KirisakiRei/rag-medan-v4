@@ -35,11 +35,12 @@ from shared.prompts import (
     PROMPT_RERANK
 )
 from shared.ocr_utils import (
-    extract_text_from_pdf,
-    extract_text_from_image,
-    extract_text_from_docx,
-    extract_text_from_xlsx,
-    format_for_display as ocr_format_for_display
+    extract_text_from_file,
+    get_ocr_engine,
+    clean_ocr_text,
+    format_for_display as ocr_format_for_display,
+    calculate_file_hash,
+    calculate_content_hash
 )
 from shared.summarizer_utils import summarize_text
 
@@ -84,11 +85,12 @@ __all__ = [
     "PROMPT_RERANK",
     
     # OCR Utils
-    "extract_text_from_pdf",
-    "extract_text_from_image",
-    "extract_text_from_docx",
-    "extract_text_from_xlsx",
+    "extract_text_from_file",
+    "get_ocr_engine",
+    "clean_ocr_text",
     "ocr_format_for_display",
+    "calculate_file_hash",
+    "calculate_content_hash",
     
     # Summarizer Utils
     "summarize_text"
