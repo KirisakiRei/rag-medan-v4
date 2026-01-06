@@ -79,15 +79,41 @@ def _call_gemini_llm(
 
 
 def _extract_json(text: str) -> Optional[Dict]:
-    """Extract JSON from text response."""
+    """Extract JSON from text response, handling markdown code blocks."""
     if not text:
         return None
     try:
-        json_match = re.search(r"\{.*\}", text, re.DOTALL)
+        # Step 1: Remove markdown code blocks if present (```json ... ``` or ``` ... ```)
+        cleaned_text = text.strip()
+        
+        # Pattern untuk remove ```json atau ``` di awal dan ``` di akhir
+        code_block_pattern = r"^```(?:json)?\s*\n?(.*?)\n?```$"
+        code_block_match = re.search(code_block_pattern, cleaned_text, re.DOTALL | re.IGNORECASE)
+        
+        if code_block_match:
+            cleaned_text = code_block_match.group(1).strip()
+            logger.debug(f"[JSON PARSE] Extracted from code block: {cleaned_text[:50]}...")
+        
+        # Step 2: Try direct JSON parse first (cleaner approach)
+        try:
+            return json.loads(cleaned_text)
+        except json.JSONDecodeError:
+            pass
+        
+        # Step 3: Fallback - extract JSON object using regex
+        json_match = re.search(r"\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}", cleaned_text, re.DOTALL)
+        if not json_match:
+            # Try simpler pattern as last resort
+            json_match = re.search(r"\{.*\}", cleaned_text, re.DOTALL)
+        
         if not json_match:
             logger.warning(f"[JSON PARSE] No JSON found in: {text[:100]}...")
             return None
+            
         return json.loads(json_match.group(0))
+    except json.JSONDecodeError as e:
+        logger.warning(f"[JSON PARSE] Invalid JSON structure: {e}")
+        return None
     except Exception as e:
         logger.exception(f"[JSON PARSE] Failed to parse: {e}")
         return None
