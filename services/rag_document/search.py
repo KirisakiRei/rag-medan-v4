@@ -133,16 +133,6 @@ async def search_document_unified(
     top_k: int = 3
 ) -> Dict[str, Any]:
     """Search di document_bank untuk unified mode, return top K candidates."""
-    - TIDAK ada AI relevance check di sini (pindah ke orchestrator)
-    - Return TOP 3 scored results untuk orchestrator aggregate
-    - Threshold lebih rendah (0.4) karena AI check di orchestrator
-    
-    Args:
-        question: Clean question dari orchestrator
-        original_question: Pertanyaan asli user
-        wa_number: Nomor WhatsApp
-        top_k: Jumlah top results untuk return
-    """
     start_time = time.time()
     
     logger.info(f"[DOC-SEARCH] Question: {question[:50]}...")
