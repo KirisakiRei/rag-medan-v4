@@ -176,7 +176,7 @@ async def search_document_unified(
             query_filter=qdrant_models.Filter(
                 must=[qdrant_models.FieldCondition(key="is_deleted", match=qdrant_models.MatchValue(value=False))]
             ),
-            limit=limit
+            limit=top_k * 2  # Fetch lebih banyak untuk filtering
         )
         qdrant_duration = time.time() - qdrant_start
 
