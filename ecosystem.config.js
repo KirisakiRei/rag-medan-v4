@@ -7,16 +7,20 @@
  *   pm2 start ecosystem.config.js           # Start all services
  *   pm2 start ecosystem.config.js --only orchestrator
  *   pm2 stop all
- *   pm2 logs
+ *   pm2 logs orchestrator
+ *   pm2 logs rag-text
  *   pm2 status
+ *   pm2 restart all
  */
+
+const path = require('path');
 
 module.exports = {
   apps: [
     // ============== ORCHESTRATOR ==============
     {
       name: "orchestrator",
-      script: "python",
+      script: path.join(__dirname, ".venv", "Scripts", "python.exe"),
       args: "-m uvicorn orchestrator.orchestrator:app --host 0.0.0.0 --port 5001",
       cwd: __dirname,
       interpreter: "none",
@@ -37,7 +41,7 @@ module.exports = {
     // ============== RAG TEXT SERVICE ==============
     {
       name: "rag-text",
-      script: "python",
+      script: path.join(__dirname, ".venv", "Scripts", "python.exe"),
       args: "-m uvicorn services.rag_text.main:app --host 0.0.0.0 --port 5010",
       cwd: __dirname,
       interpreter: "none",
@@ -58,7 +62,7 @@ module.exports = {
     // ============== RAG DOCUMENT SERVICE ==============
     {
       name: "rag-document",
-      script: "python",
+      script: path.join(__dirname, ".venv", "Scripts", "python.exe"),
       args: "-m uvicorn services.rag_document.main:app --host 0.0.0.0 --port 5011",
       cwd: __dirname,
       interpreter: "none",
@@ -79,7 +83,7 @@ module.exports = {
     // ============== RAG WEB SERVICE ==============
     {
       name: "rag-web",
-      script: "python",
+      script: path.join(__dirname, ".venv", "Scripts", "python.exe"),
       args: "-m uvicorn services.rag_web.main:app --host 0.0.0.0 --port 5012",
       cwd: __dirname,
       interpreter: "none",
@@ -100,7 +104,7 @@ module.exports = {
     // ============== RAG USULAN SERVICE ==============
     {
       name: "rag-usulan",
-      script: "python",
+      script: path.join(__dirname, ".venv", "Scripts", "python.exe"),
       args: "-m uvicorn services.rag_usulan.main:app --host 0.0.0.0 --port 5013",
       cwd: __dirname,
       interpreter: "none",
