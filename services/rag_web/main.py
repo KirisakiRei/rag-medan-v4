@@ -164,11 +164,7 @@ async def internal_search(request: SearchRequest):
 
 @app.post("/internal/search-unified")
 async def internal_search_unified(request: UnifiedSearchRequest):
-    """
-    Internal search endpoint untuk unified/parallel mode.
-    Dipanggil oleh orchestrator saat /api/search.
-    Return format sama dengan text service untuk selection.
-    """
+    """Internal search endpoint untuk unified/parallel mode dari orchestrator.\"\"\"
     logger.info(f"[SEARCH-UNIFIED] Question: {request.question[:50]}...")
     
     result = await search_module.search_web_unified(

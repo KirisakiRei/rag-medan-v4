@@ -179,7 +179,7 @@ def keyword_overlap(question_a: str, question_b: str) -> float:
 
 
 def hard_filter_local(question: str) -> Dict[str, Any]:
-    """Local hard filter tanpa AI - cek lokasi dan opini."""
+    """Local hard filter untuk cek lokasi dan opini.\"\"\"
     question_lower = question.lower()
     question_normalized = re.sub(r"[^\w\s]", " ", question_lower)
     question_normalized = re.sub(r"\s+", " ", question_normalized)

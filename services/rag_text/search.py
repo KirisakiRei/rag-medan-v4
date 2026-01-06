@@ -1,8 +1,7 @@
 """
-RAG Text Service - Search Module (V3 - Orchestrator Post-Filter)
-Logic pencarian di knowledge_bank
-TANPA AI RELEVANCE CHECK - Post-filter dilakukan di Orchestrator
-Return TOP 3 scored results untuk orchestrator aggregate
+RAG Text Service - Search Module
+Logic pencarian di knowledge_bank dengan score-based selection.
+Returns top 3 scored results untuk orchestrator aggregate.
 """
 import os
 import sys
@@ -46,27 +45,9 @@ async def search_knowledge_bank(
     limit: int = 5,
     original_question: str = None,
     skip_prefilter: bool = False,
-    top_k: int = 3  # Return top K results untuk orchestrator
+    top_k: int = 3
 ) -> Dict[str, Any]:
-    """
-    Search di knowledge_bank.
-    
-    V3 CHANGES:
-    - TIDAK ada AI relevance check di sini (pindah ke orchestrator)
-    - Return TOP 3 scored results untuk orchestrator aggregate
-    - Scoring threshold tetap (dense >= threshold untuk basic filter)
-    
-    Args:
-        question: Pertanyaan user (atau clean_question jika dari orchestrator)
-        wa_number: Nomor WhatsApp user
-        limit: Jumlah hasil dari Qdrant
-        original_question: Pertanyaan asli user (jika skip_prefilter=True)
-        skip_prefilter: Jika True, skip AI pre-filter (sudah dilakukan di orchestrator)
-        top_k: Jumlah top results untuk return ke orchestrator
-    
-    Returns:
-        Dict dengan scored results untuk orchestrator
-    """
+    """Search di knowledge_bank, return top K scored results untuk orchestrator."""
     start_time = time.time()
     user_question = (question or "").strip()
     whatsapp_number = wa_number
@@ -87,9 +68,6 @@ async def search_knowledge_bank(
 
     logger.info(f"[TEXT-SEARCH] Question: {display_question[:50]}...")
 
-    # =====================================================
-    # 1. AI Pre-Filter (SKIP JIKA DARI ORCHESTRATOR)
-    # =====================================================
     pre_filter_start = time.time()
     pre_filter_duration = 0.0
     
@@ -123,16 +101,10 @@ async def search_knowledge_bank(
                 }
             }
 
-    # =====================================================
-    # 2. Normalize question dan detect category
-    # =====================================================
     normalized_question = normalize_text(clean_location_terms(pre_filter_result.get("clean_question", user_question)))
     detected_category = detect_category(normalized_question)
     category_id = detected_category["id"] if detected_category else None
 
-    # =====================================================
-    # 3. Embedding & Query Qdrant
-    # =====================================================
     embedding_start = time.time()
     query_vector = model.encode("query: " + normalized_question).tolist()
     embedding_duration = time.time() - embedding_start
@@ -153,9 +125,6 @@ async def search_knowledge_bank(
     )
     qdrant_duration = time.time() - qdrant_start
 
-    # =====================================================
-    # 4. Scoring Logic (TANPA AI Relevance Check!)
-    # =====================================================
     scored_results = []
     
     for hit in qdrant_results:
@@ -163,15 +132,11 @@ async def search_knowledge_bank(
         rag_question = hit.payload.get("question_rag_name", "")
         overlap_score = keyword_overlap(normalized_question, rag_question)
         
-        # Final score = 0.65 * dense + 0.35 * overlap (PERSIS V2)
         final_score = round((0.65 * dense_score) + (0.35 * overlap_score), 3)
         
-        # Basic threshold filter (lebih rendah karena AI check di orchestrator)
-        # Kita kirim semua yang punya potential, orchestrator yang decide
         acceptance_note = "-"
         passes_threshold = False
         
-        # Threshold logic (sama seperti V2 tapi tanpa AI check)
         if dense_score >= 0.90:
             passes_threshold = True
             acceptance_note = "high_dense"
@@ -179,11 +144,9 @@ async def search_knowledge_bank(
             passes_threshold = True
             acceptance_note = "good_overlap"
         elif dense_score >= 0.83 and overlap_score >= 0.15:
-            # Ini yang sebelumnya butuh AI check, sekarang kirim ke orchestrator
             passes_threshold = True
             acceptance_note = "needs_ai_check"
         elif dense_score >= 0.80:
-            # Lower threshold, let orchestrator decide
             passes_threshold = True
             acceptance_note = "marginal"
         
@@ -199,26 +162,19 @@ async def search_knowledge_bank(
                 "overlap_score": overlap_score,
                 "final_score": final_score,
                 "note": acceptance_note,
-                # Content untuk AI relevance check di orchestrator
                 "content_for_check": rag_question
             })
 
-    # Sort by final_score descending
     scored_results = sorted(scored_results, key=lambda x: x["final_score"], reverse=True)
     
-    # Take top K
     top_results = scored_results[:top_k]
     
-    # Log results
     logger.info(f"[TEXT-SEARCH] Found {len(scored_results)} results, returning top {len(top_results)}")
     for i, r in enumerate(top_results):
         logger.info(f"  [{i+1}] {r['question_rag_name'][:50]}... | dense={r['dense_score']:.3f} | overlap={r['overlap_score']:.3f} | final={r['final_score']:.3f}")
 
     total_duration = time.time() - start_time
 
-    # =====================================================
-    # 5. RESPONSE - Return scored results untuk orchestrator
-    # =====================================================
     if top_results:
         return {
             "status": "has_candidates",

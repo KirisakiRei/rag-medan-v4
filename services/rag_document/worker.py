@@ -239,7 +239,8 @@ def process_document(task_id: str, doc_id: str, file_url: str, opd_name: str):
         points = []
         
         for i, chunk_text in enumerate(chunks):
-            embedding = model.encode(chunk_text, convert_to_numpy=True).tolist()
+            # E5 model requires 'passage:' prefix for documents
+            embedding = model.encode(f"passage: {chunk_text}", convert_to_numpy=True).tolist()
             point_id = str(uuid.uuid4())
             
             payload = {

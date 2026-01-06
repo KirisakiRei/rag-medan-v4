@@ -1,31 +1,6 @@
 """
 RAG Medan v3 - Orchestrator
-Controller utama yang mengatur semua service RAG.
-
-ARSITEKTUR V3:
-1. User request masuk ke Orchestrator
-2. Orchestrator melakukan PRE-FILTER (AI domain check, normalisasi)
-3. Orchestrator meneruskan clean_question ke SEMUA 3 services secara PARALEL
-4. Semua services mengembalikan hasil ke Orchestrator
-5. Orchestrator MEMILIH hasil terbaik berdasarkan status:
-   - Priority: text (success) > document (success) > web (success)
-   - Jika semua low_confidence → return low_confidence dengan combined results
-
-ENDPOINT SAMA DENGAN V2:
-- POST /api/search         -> Unified RAG (Text + Document + Web PARALEL)
-- POST /api/sync           -> Sync knowledge_bank
-- POST /api/doc-search     -> Direct RAG Document only
-- POST /api/doc-sync       -> Sync document_bank
-- GET  /api/doc-sync/status/{task_id}
-- DELETE /api/doc-delete   -> Delete document
-- POST /api/sync-usulan    -> Sync usulan_bank
-- POST /api/search-usulan  -> RAG Usulan
-
-NEW IN V3:
-- POST /api/web-trigger    -> Trigger scraping
-- POST /api/web-sync       -> Sync edited web content
-- DELETE /api/web-delete   -> Delete web content
-- POST /api/web-search     -> Direct RAG Web only
+Unified controller untuk semua RAG services dengan parallel search dan score-based selection.
 """
 import os
 import sys
@@ -59,50 +34,41 @@ http_client: httpx.AsyncClient = None
 # ============== REQUEST/RESPONSE MODELS (V2 COMPATIBLE) ==============
 
 class SearchRequest(BaseModel):
-    """Request untuk /api/search - SAMA DENGAN V2"""
     question: str
     wa_number: str = "unknown"
 
 
 class SyncRequest(BaseModel):
-    """Request untuk /api/sync - SAMA DENGAN V2"""
     action: str
     content: Optional[Any] = None
 
 
 class DocSearchRequest(BaseModel):
-    """Request untuk /api/doc-search - SAMA DENGAN V2"""
     query: str
     limit: int = 5
 
 
 class DocSyncRequest(BaseModel):
-    """Request untuk /api/doc-sync - SAMA DENGAN V2"""
     doc_id: str
     opd_name: Optional[str] = None
     file_url: str
 
 
 class DocDeleteRequest(BaseModel):
-    """Request untuk /api/doc-delete - SAMA DENGAN V2"""
     doc_id: str
 
 
 class UsulanSyncRequest(BaseModel):
-    """Request untuk /api/sync-usulan - SAMA DENGAN V2"""
     action: str
     content: Optional[Any] = None
 
 
 class UsulanSearchRequest(BaseModel):
-    """Request untuk /api/search-usulan - SAMA DENGAN V2"""
     question: str
     wa_number: str = "unknown"
 
 
-# NEW V3 Models
 class WebTriggerRequest(BaseModel):
-    """Request untuk /api/web-trigger"""
     link_id: str
     url: str
     callback_url: Optional[str] = None
@@ -110,18 +76,15 @@ class WebTriggerRequest(BaseModel):
 
 
 class WebSyncRequest(BaseModel):
-    """Request untuk /api/web-sync"""
     link_id: str
     edited_content: str
 
 
 class WebDeleteRequest(BaseModel):
-    """Request untuk /api/web-delete"""
     link_id: str
 
 
 class WebSearchRequest(BaseModel):
-    """Request untuk /api/web-search"""
     query: str
     limit: int = 5
 
@@ -135,19 +98,7 @@ async def call_service(
     data: dict = None,
     timeout: float = 120.0
 ) -> dict:
-    """
-    Call internal service endpoint.
-    
-    Args:
-        service_url: Base URL service
-        endpoint: Endpoint path
-        method: HTTP method
-        data: Request data
-        timeout: Request timeout
-        
-    Returns:
-        Response dict
-    """
+    """Call internal service endpoint."""
     url = f"{service_url}{endpoint}"
     
     try:
@@ -181,10 +132,7 @@ async def call_service_safe(
     timeout: float = 60.0,
     service_name: str = "unknown"
 ) -> Tuple[str, dict]:
-    """
-    Call service dengan safety wrapper untuk parallel execution.
-    Returns tuple (service_name, result) untuk identification.
-    """
+    """Call service dengan safety wrapper, returns tuple (service_name, result)."""
     try:
         result = await call_service(service_url, endpoint, method, data, timeout)
         return (service_name, result)
@@ -197,12 +145,9 @@ async def call_service_safe(
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Application lifespan."""
     global http_client
     
     logger.info("Starting RAG Medan v3 - Orchestrator...")
-    
-    # Initialize HTTP client
     http_client = httpx.AsyncClient()
     
     logger.info("Orchestrator Started - PARALLEL SEARCH MODE")
@@ -224,7 +169,6 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=config.CORS_ORIGINS,
@@ -299,20 +243,8 @@ async def health_check():
 @app.post("/api/search")
 async def unified_search(request: SearchRequest):
     """
-    UNIFIED SEARCH - V3 PARALLEL MODE (OPTION B - Score-based Selection)
-    
-    ARSITEKTUR BARU:
-    1. Pre-filter di orchestrator (AI domain check)
-    2. Call SEMUA 3 services PARALEL (text, document, web)
-    3. AGGREGATE semua results dari 3 services
-    4. SORT by final_score (descending)
-    5. AI RELEVANCE CHECK pada top candidates (di orchestrator saja)
-    6. Return hasil RELEVANT dengan score tertinggi
-    
-    KEUNTUNGAN vs V3 lama:
-    - AKURASI: Pemilihan berdasarkan score, bukan priority
-    - EFISIEN: 1x AI call (di orchestrator), bukan 3x (di tiap service)
-    - FALLBACK: Jika top candidate tidak relevant, coba next candidate
+    Unified search dengan parallel execution dan score-based selection.
+    Returns hasil dengan score tertinggi yang relevant menurut AI check.
     """
     start_time = time.time()
     user_question = (request.question or "").strip()
@@ -324,16 +256,23 @@ async def unified_search(request: SearchRequest):
             content={"status": "error", "message": "Field 'question' wajib diisi"}
         )
 
-    logger.info(f"[SEARCH] Question: {user_question} | wa_number: {wa_number}")
+    logger.info("=" * 80)
+    logger.info(f"[USER-QUESTION] {user_question}")
+    logger.info(f"[WA-NUMBER] {wa_number}")
+    logger.info("=" * 80)
 
     # =====================================================
     # 1. PRE-FILTER DI ORCHESTRATOR
     # =====================================================
+    logger.info("[AI-FILTER] Memulai Pre Filter Pertanyaan")
+    logger.info("-" * 80)
+    
     pre_filter_start = time.time()
     pre_filter_result = ai_pre_filter(user_question)
     pre_filter_duration = time.time() - pre_filter_start
 
     logger.info(f"[PRE-FILTER] Valid: {pre_filter_result.get('valid')} | Clean: {pre_filter_result.get('clean_question', '-')[:50]}...")
+    logger.info("=" * 80)
 
     # Jika tidak valid dari pre-filter, return langsung
     if not pre_filter_result.get("valid", True):
@@ -374,7 +313,9 @@ async def unified_search(request: SearchRequest):
     # =====================================================
     # 2. PARALLEL CALL KE SEMUA SERVICES
     # =====================================================
-    logger.info(f"[PARALLEL] Calling 3 services with clean_question: {normalized_question[:50]}...")
+    logger.info("[PARALLEL-SEARCH] Calling 3 services simultaneously")
+    logger.info("-" * 80)
+    logger.info(f"[QUERY] {normalized_question}")
     parallel_start = time.time()
 
     # Prepare parallel tasks
@@ -434,12 +375,15 @@ async def unified_search(request: SearchRequest):
         service_results[service_name] = response
         status = response.get("status", "error")
         count = response.get("data", {}).get("count", 0)
-        logger.info(f"[PARALLEL] {service_name}: status={status}, candidates={count}")
+        logger.info(f"  ✓ {service_name.upper()}: status={status}, candidates={count}")
 
+    logger.info("=" * 80)
+    
     # =====================================================
     # 3. AGGREGATE SEMUA HASIL
     # =====================================================
-    logger.info("[AGGREGATE] Mengumpulkan semua candidates dari 3 services...")
+    logger.info("[AGGREGATE] Mengumpulkan semua candidates dari 3 services")
+    logger.info("-" * 80)
     
     all_candidates = []
     
@@ -465,13 +409,18 @@ async def unified_search(request: SearchRequest):
         logger.info(f"[AGGREGATE] Web: {len(web_candidates)} candidates")
     
     logger.info(f"[AGGREGATE] Total candidates: {len(all_candidates)}")
+    logger.info("=" * 80)
 
     # =====================================================
     # 4. SORT BY FINAL_SCORE (DESCENDING)
     # =====================================================
     if all_candidates:
         all_candidates.sort(key=lambda x: x.get("final_score", 0.0), reverse=True)
-        logger.info(f"[SORT] Top 3 scores: {[c.get('final_score', 0) for c in all_candidates[:3]]}")
+        logger.info("[SORT] Top candidates by score:")
+        logger.info("-" * 80)
+        for i, c in enumerate(all_candidates[:5]):
+            logger.info(f"  [{i+1}] {c.get('source', '?').upper()} | score={c.get('final_score', 0):.4f}")
+        logger.info("=" * 80)
 
     # =====================================================
     # 5. AI RELEVANCE CHECK (DI ORCHESTRATOR SAJA)
@@ -511,6 +460,9 @@ async def unified_search(request: SearchRequest):
         )
     
     # Check top candidates untuk relevance
+    logger.info("[AI-RELEVANCE] Checking top candidates")
+    logger.info("-" * 80)
+    
     relevance_start = time.time()
     selected_candidate = None
     ai_reason = "-"
@@ -527,24 +479,26 @@ async def unified_search(request: SearchRequest):
         
         # Jika score sangat tinggi (dense >= 0.90), skip AI check (trust score)
         if candidate.get("dense_score", 0) >= 0.90:
-            logger.info(f"[RELEVANCE] Candidate #{idx+1} ({source}): HIGH SCORE {score:.4f} - SKIP AI CHECK")
+            logger.info(f"  [{idx+1}] {source.upper()}: score={score:.4f} → HIGH SCORE, SKIP AI CHECK ✓")
             selected_candidate = candidate
             ai_reason = f"High confidence score (dense >= 0.90)"
             break
         
         # AI Relevance Check
-        logger.info(f"[RELEVANCE] Checking candidate #{idx+1} ({source}): score={score:.4f}...")
+        logger.info(f"  [{idx+1}] {source.upper()}: score={score:.4f} → Checking relevance...")
         relevance_result = ai_check_relevance(user_question, content_for_check)
         
         is_relevant = relevance_result.get("relevant", False)
         ai_reason = relevance_result.get("reason", "-")
         
         if is_relevant:
-            logger.info(f"[RELEVANCE] ✓ Candidate #{idx+1} ({source}) RELEVANT")
+            logger.info(f"       → RELEVANT ✓")
             selected_candidate = candidate
             break
         else:
-            logger.info(f"[RELEVANCE] ✗ Candidate #{idx+1} ({source}) NOT RELEVANT - trying next...")
+            logger.info(f"       → NOT RELEVANT ✗ (trying next...)")
+    
+    logger.info("=" * 80)
     
     relevance_duration = time.time() - relevance_start
     total_duration = time.time() - start_time
@@ -606,7 +560,13 @@ async def unified_search(request: SearchRequest):
         if document_info:
             response_payload["data"]["metadata"]["document_info"] = document_info
         
-        logger.info(f"[RESULT] SUCCESS from {source} | score={selected_candidate.get('final_score', 0):.4f} | checked={candidates_checked} | total: {total_duration:.3f}s")
+        logger.info("[RESULT] SUCCESS ✓")
+        logger.info(f"  Source: {source.upper()}")
+        logger.info(f"  Score: {selected_candidate.get('final_score', 0):.4f}")
+        logger.info(f"  Candidates Checked: {candidates_checked}/{len(all_candidates)}")
+        logger.info(f"  Total Time: {total_duration:.3f}s")
+        logger.info("=" * 80)
+        
         return JSONResponse(status_code=200, content=response_payload)
     
     else:
@@ -654,7 +614,13 @@ async def unified_search(request: SearchRequest):
         }
         
         best_score = top_candidate.get('final_score', 0) if top_candidate else 0
-        logger.info(f"[RESULT] LOW_CONFIDENCE | best_source={source} | score={best_score:.4f} | checked={candidates_checked} | total: {total_duration:.3f}s")
+        logger.info("[RESULT] LOW_CONFIDENCE ✗")
+        logger.info(f"  Best Source: {source.upper()}")
+        logger.info(f"  Best Score: {best_score:.4f}")
+        logger.info(f"  Candidates Checked: {candidates_checked}/{len(all_candidates)}")
+        logger.info(f"  Total Time: {total_duration:.3f}s")
+        logger.info("=" * 80)
+        
         return JSONResponse(status_code=200, content=response_payload)
 
 
@@ -662,10 +628,7 @@ async def unified_search(request: SearchRequest):
 
 @app.post("/api/sync")
 async def sync_data(request: SyncRequest):
-    """
-    Sync data ke knowledge_bank.
-    Response format SAMA DENGAN V2.
-    """
+    """Sync data ke knowledge_bank."""
     logger.info(f"[SYNC] Action: {request.action}")
     
     result = await call_service(
@@ -682,11 +645,7 @@ async def sync_data(request: SyncRequest):
 
 @app.post("/api/doc-search")
 async def doc_search(request: DocSearchRequest):
-    """
-    Search di RAG Document (document_bank) - DIRECT MODE.
-    Tidak melalui parallel search, langsung ke document service.
-    Response format SAMA DENGAN V2.
-    """
+    """Search di RAG Document (document_bank) direct mode."""
     logger.info(f"[DOC-SEARCH] Query: {request.query}, limit: {request.limit}")
     
     result = await call_service(
@@ -704,10 +663,7 @@ async def doc_search(request: DocSearchRequest):
 
 @app.post("/api/doc-sync")
 async def doc_sync(request: DocSyncRequest):
-    """
-    Sync document (trigger OCR).
-    Response format SAMA DENGAN V2.
-    """
+    """Sync document (trigger OCR)."""
     logger.info(f"[DOC-SYNC] doc_id={request.doc_id}, opd={request.opd_name}")
     
     result = await call_service(
@@ -726,10 +682,7 @@ async def doc_sync(request: DocSyncRequest):
 
 @app.get("/api/doc-sync/status/{task_id}")
 async def get_task_status(task_id: str):
-    """
-    Get status task OCR.
-    SAMA DENGAN V2.
-    """
+    """Get status task OCR."""
     result = await call_service(
         config.DOCUMENT_SERVICE_URL,
         f"/internal/sync/status/{task_id}",
@@ -755,10 +708,7 @@ async def list_tasks():
 
 @app.delete("/api/doc-delete")
 async def doc_delete(request: DocDeleteRequest):
-    """
-    Soft delete document.
-    Response format SAMA DENGAN V2.
-    """
+    """Soft delete document."""
     logger.info(f"[DOC-DELETE] doc_id={request.doc_id}")
     
     result = await call_service(
@@ -778,10 +728,7 @@ async def doc_delete(request: DocDeleteRequest):
 
 @app.post("/api/sync-usulan")
 async def sync_usulan(request: UsulanSyncRequest):
-    """
-    Sync data ke usulan_bank.
-    Response format SAMA DENGAN V2.
-    """
+    """Sync usulan ke usulan_bank."""
     logger.info(f"[SYNC-USULAN] Action: {request.action}")
     
     result = await call_service(
@@ -796,10 +743,7 @@ async def sync_usulan(request: UsulanSyncRequest):
 
 @app.post("/api/search-usulan")
 async def search_usulan(request: UsulanSearchRequest):
-    """
-    Search di RAG Usulan (usulan_bank).
-    Response format SAMA DENGAN V2.
-    """
+    """Search di RAG Usulan (usulan_bank)."""
     logger.info(f"[SEARCH-USULAN] Question: {request.question}, wa_number: {request.wa_number}")
     
     result = await call_service(

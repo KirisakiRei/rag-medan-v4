@@ -1,7 +1,6 @@
 """
 RAG Text Service - Sync Module
-Logic sinkronisasi data ke knowledge_bank
-PAYLOAD DAN RESPONSE HARUS PERSIS SEPERTI V2!
+Logic sinkronisasi knowledge_bank.
 """
 import os
 import sys

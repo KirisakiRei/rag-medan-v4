@@ -1,7 +1,6 @@
 """
 RAG Document Service - Search Module
-Logic pencarian di document_bank
-PAYLOAD HARUS PERSIS SEPERTI V2!
+Logic pencarian di document_bank.
 """
 import os
 import sys
@@ -35,8 +34,8 @@ def set_instances(embedding_model: SentenceTransformer, qdrant_client: AsyncQdra
 
 
 def embed_query(model_doc: SentenceTransformer, text: str) -> List[float]:
-    """Generate embedding untuk query."""
-    return model_doc.encode(text, convert_to_numpy=True).tolist()
+    """Generate embedding untuk query dengan prefix 'query:' (E5 model requirement)."""
+    return model_doc.encode(f"query: {text}", convert_to_numpy=True).tolist()
 
 
 async def search_document_bank(
@@ -44,13 +43,7 @@ async def search_document_bank(
     limit: int = 5,
     request_source: str = "unknown"
 ) -> Dict[str, Any]:
-    """
-    Search di document_bank.
-    PAYLOAD PERSIS SEPERTI V2!
-    
-    Returns:
-        Dict dengan format v2-compatible response
-    """
+    """Search di document_bank, compatible dengan V2 response format."""
     logger.info(f"[API] doc-search query='{query}' limit={limit} | source={request_source}")
 
     try:
@@ -72,7 +65,6 @@ async def search_document_bank(
             result_payload = getattr(result_item, "payload", {}) or result_item.get("payload", {})
             result_score = getattr(result_item, "score", 0.0)
 
-            # PAYLOAD RESULT PERSIS V2:
             search_results.append({
                 "doc_id": result_payload.get("mysql_id"),
                 "opd": result_payload.get("opd"),
@@ -85,14 +77,12 @@ async def search_document_bank(
                 "score": float(result_score)
             })
 
-        # RESPONSE PERSIS V2:
         if not search_results:
             logger.info(f"[API] doc-search no results for query='{query}'")
             return {"status": "empty", "results": []}
 
         logger.info(f"[API] doc-search results={len(search_results)} hits | top_score={search_results[0]['score']:.3f}")
 
-        # Cek config untuk post-summary
         use_post_summary = config.RAG_USE_POST_SUMMARY
         post_summary_top_k = config.RAG_POST_SUMMARY_TOP_K
 
@@ -112,7 +102,6 @@ async def search_document_bank(
                 logger.warning(f"[POST-SUM] Gagal meringkas hasil: {e}")
                 generated_summary = "Tidak dapat membuat ringkasan hasil."
 
-            # RESPONSE DENGAN POST-SUMMARY PERSIS V2:
             return {
                 "status": "success",
                 "mode": "post-summary",
@@ -121,7 +110,6 @@ async def search_document_bank(
                 "results": top_ranked_results
             }
 
-        # RESPONSE DIRECT MODE PERSIS V2:
         return {
             "status": "success",
             "mode": "direct",
@@ -144,10 +132,7 @@ async def search_document_unified(
     wa_number: str = "unknown",
     top_k: int = 3
 ) -> Dict[str, Any]:
-    """
-    Search di document_bank untuk unified/parallel mode.
-    
-    V3 CHANGES:
+    """Search di document_bank untuk unified mode, return top K candidates."""
     - TIDAK ada AI relevance check di sini (pindah ke orchestrator)
     - Return TOP 3 scored results untuk orchestrator aggregate
     - Threshold lebih rendah (0.4) karena AI check di orchestrator
@@ -163,12 +148,10 @@ async def search_document_unified(
     logger.info(f"[DOC-SEARCH] Question: {question[:50]}...")
 
     try:
-        # 1. Embed query
         embedding_start = time.time()
         query_vector = embed_query(model, question)
         embedding_duration = time.time() - embedding_start
 
-        # 2. Query ke Qdrant dengan filter is_deleted=False
         qdrant_start = time.time()
         qdrant_hits = await qdrant.query_points(
             collection_name=config.COLLECTION_DOCUMENT,
@@ -182,7 +165,6 @@ async def search_document_unified(
 
         result_points = getattr(qdrant_hits, "points", None) or getattr(qdrant_hits, "result", None) or qdrant_hits
 
-        # Tidak ada hasil
         if not result_points:
             total_duration = time.time() - start_time
             logger.info("[DOC-SEARCH] No document results")
@@ -207,7 +189,6 @@ async def search_document_unified(
                 }
             }
 
-        # 3. Process results - NO AI CHECK, just scoring
         scored_results = []
         
         for hit in result_points:
@@ -216,9 +197,7 @@ async def search_document_unified(
             score = float(getattr(result_item, "score", 0.0))
             document_text = payload.get("text", "")
             
-            # Threshold check (lebih rendah, orchestrator yang final decide)
             if score >= 0.4 and document_text:
-                # Determine acceptance note
                 if score >= 0.85:
                     note = "high_score"
                 elif score >= 0.70:
@@ -237,9 +216,7 @@ async def search_document_unified(
                     "overlap_score": 0.0,
                     "final_score": round(score, 3),
                     "note": note,
-                    # Content untuk AI relevance check di orchestrator
-                    "content_for_check": document_text[:2000],  # Limit untuk AI check
-                    # Document metadata
+                    "content_for_check": document_text[:2000],
                     "document_info": {
                         "filename": payload.get("filename", "-"),
                         "page_number": payload.get("page_number", "-"),
@@ -248,13 +225,10 @@ async def search_document_unified(
                     }
                 })
         
-        # Sort by score descending
         scored_results = sorted(scored_results, key=lambda x: x["final_score"], reverse=True)
         
-        # Take top K
         top_results = scored_results[:top_k]
         
-        # Log results
         logger.info(f"[DOC-SEARCH] Found {len(scored_results)} results, returning top {len(top_results)}")
         for i, r in enumerate(top_results):
             logger.info(f"  [{i+1}] {r['document_info']['filename']} p.{r['document_info']['page_number']} | score={r['final_score']:.3f}")

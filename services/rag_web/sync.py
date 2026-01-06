@@ -37,8 +37,8 @@ def set_instances(embedding_model: SentenceTransformer, qdrant_client: AsyncQdra
 
 
 def embed_text(text: str) -> List[float]:
-    """Generate embedding untuk text."""
-    return model.encode(text, convert_to_numpy=True).tolist()
+    """Generate embedding untuk text dengan prefix 'passage:' (E5 model requirement)."""
+    return model.encode(f"passage: {text}", convert_to_numpy=True).tolist()
 
 
 async def store_chunks(

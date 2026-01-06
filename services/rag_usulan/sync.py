@@ -1,7 +1,6 @@
 """
 RAG Usulan Service - Sync Module
-Logic sinkronisasi data ke usulan_bank
-PAYLOAD DAN RESPONSE HARUS PERSIS SEPERTI V2!
+Logic sinkronisasi usulan_bank.
 """
 import os
 import sys

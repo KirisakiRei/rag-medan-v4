@@ -1,7 +1,6 @@
 """
 RAG Web Service - Search Module
-Logic pencarian di web_scraping_bank
-PAYLOAD HARUS PERSIS SEPERTI web-scraping V2!
+Logic pencarian di web_scraping_bank.
 """
 import os
 import sys
@@ -38,24 +37,16 @@ async def search_web_bank(
     limit: int = 5,
     score_threshold: float = 0.5
 ) -> Dict[str, Any]:
-    """
-    Semantic search di RAG Web Scraping.
-    PAYLOAD PERSIS SEPERTI web-scraping V2!
-    
-    Returns:
-        Dict dengan format v2-compatible response
-    """
+    """Semantic search di RAG Web Scraping, compatible dengan V2 response format."""
     start_total = time.time()
     
     logger.info(f"Search request: question='{question}', wa_number={wa_number}")
     
-    # Preprocess question (PERSIS V2)
     final_question = question.strip().rstrip("?").strip()
     
-    # 1. Generate embedding untuk query
     start_embed = time.time()
     try:
-        query_embedding = model.encode(final_question, convert_to_numpy=True).tolist()
+        query_embedding = model.encode(f"query: {final_question}", convert_to_numpy=True).tolist()
     except Exception as e:
         logger.error(f"Embedding error: {e}")
         return _build_error_response(
@@ -66,7 +57,6 @@ async def search_web_bank(
         )
     embed_time = time.time() - start_embed
     
-    # 2. Search di Qdrant
     start_qdrant = time.time()
     try:
         results = await qdrant.search(
@@ -95,7 +85,6 @@ async def search_web_bank(
     
     total_time = time.time() - start_total
     
-    # 3. Build response (PERSIS V2)
     if not results:
         logger.info(f"No results found for: {final_question}")
         return {
@@ -122,7 +111,6 @@ async def search_web_bank(
             }
         }
     
-    # Build similar_questions dari hasil (PERSIS V2)
     similar_questions = []
     top_result_payload = results[0].payload
     top_result_score = float(results[0].score)
@@ -131,7 +119,6 @@ async def search_web_bank(
         payload = hit.payload
         score = float(hit.score)
         
-        # PAYLOAD RESULT PERSIS V2:
         similar_questions.append({
             "question": "-",
             "question_rag_name": "-",
@@ -144,7 +131,6 @@ async def search_web_bank(
             "note": "from_web_scraping"
         })
     
-    # Build web_info dari top result (PERSIS V2)
     web_info = {
         "url": top_result_payload.get("url", ""),
         "title": top_result_payload.get("title", ""),
@@ -153,7 +139,6 @@ async def search_web_bank(
     
     logger.info(f"Search completed: {len(results)} results, top_score={top_result_score:.3f}")
     
-    # RESPONSE PERSIS V2:
     return {
         "status": "success",
         "message": "Hasil ditemukan dari web scraping",
@@ -185,7 +170,7 @@ def _build_error_response(
     final_question: str,
     error_message: str
 ) -> Dict[str, Any]:
-    """Build error response dengan format yang konsisten (PERSIS V2)."""
+    """Build error response dengan format yang konsisten."""
     return {
         "status": "error",
         "message": error_message,
@@ -218,33 +203,17 @@ async def search_web_unified(
     top_k: int = 3,
     score_threshold: float = 0.5
 ) -> Dict[str, Any]:
-    """
-    Search di web_scraping_bank untuk unified/parallel mode.
-    
-    PERUBAHAN ARSITEKTUR (Option B):
-    - TIDAK ada AI relevance check di sini
-    - Return top_k hasil dengan scoring yang memenuhi threshold
-    - AI relevance check dilakukan HANYA di orchestrator
-    - Service ini hanya bertanggung jawab: query → score → return candidates
-    
-    LOGIC:
-    1. Embed query
-    2. Query ke web_scraping_bank
-    3. Filter by score threshold >= 0.5
-    4. Return top_k results dengan content_for_check untuk orchestrator
-    """
+    """Search di web_scraping_bank untuk unified mode, return top K candidates."""
     start_time = time.time()
     
     logger.info(f"[UNIFIED] Search web: {question[:50]}...")
 
     try:
-        # 1. Embed query
         embedding_start = time.time()
         final_question = question.strip().rstrip("?").strip()
-        query_embedding = model.encode(final_question, convert_to_numpy=True).tolist()
+        query_embedding = model.encode(f"query: {final_question}", convert_to_numpy=True).tolist()
         embedding_duration = time.time() - embedding_start
 
-        # 2. Query ke Qdrant dengan filter is_deleted=False
         qdrant_start = time.time()
         results = await qdrant.search(
             collection_name=config.COLLECTION_WEB,
@@ -262,7 +231,6 @@ async def search_web_unified(
         )
         qdrant_duration = time.time() - qdrant_start
 
-        # Tidak ada hasil
         if not results:
             total_duration = time.time() - start_time
             logger.info("[UNIFIED] No web results found above threshold")
@@ -287,22 +255,19 @@ async def search_web_unified(
                 }
             }
 
-        # 3. Build scored results - TIDAK ada AI check
         scored_results = []
         
-        for idx, hit in enumerate(results[:top_k]):  # Limit to top_k
+        for idx, hit in enumerate(results[:top_k]):
             payload = hit.payload
             score = float(hit.score)
             web_content = payload.get("content", "")
             
-            # Web info untuk metadata
             web_info = {
                 "url": payload.get("url", ""),
                 "title": payload.get("title", ""),
                 "link_id": payload.get("link_id", "")
             }
             
-            # Determine note based on score
             if score >= 0.7:
                 note = "web_high_confidence"
             elif score >= 0.6:
@@ -316,12 +281,10 @@ async def search_web_unified(
                 "question": web_info.get("title", "-"),
                 "answer_doc": web_content,
                 "dense_score": round(score, 4),
-                "overlap_score": 0.0,  # Web tidak punya overlap
+                "overlap_score": 0.0,
                 "final_score": round(score, 4),
                 "note": note,
-                # Content untuk AI check di orchestrator (limit 2000 chars)
                 "content_for_check": web_content[:2000] if len(web_content) > 2000 else web_content,
-                # Web-specific metadata
                 "web_info": web_info
             }
             
@@ -330,7 +293,6 @@ async def search_web_unified(
 
         total_duration = time.time() - start_time
         
-        # 4. Return candidates untuk orchestrator
         logger.info(f"[UNIFIED] Web returning {len(scored_results)} candidates for orchestrator evaluation")
         
         return {
