@@ -16,6 +16,7 @@ STOPWORDS: Set[str] = {
 
 # Sinonim untuk ekspansi query
 SYNONYMS: Dict[str, List[str]] = {
+    # Singkatan pemerintah
     "ktp": ["kartu tanda penduduk"],
     "kk": ["kartu keluarga"],
     "kadis": ["kepala dinas"],
@@ -34,7 +35,32 @@ SYNONYMS: Dict[str, List[str]] = {
     "nisn": ["nomor induk siswa nasional"],
     "pkl": ["praktek kerja lapangan"],
     "skkni": ["standar kompetensi kerja nasional indonesia"],
-    "siduta": ["sistem informasi terpadu ketenagakerjaan"]
+    "siduta": ["sistem informasi terpadu ketenagakerjaan"],
+    # Sinonim bahasa informal -> formal
+    "gimana": ["bagaimana", "caranya"],
+    "gimn": ["bagaimana", "caranya"],
+    "gmn": ["bagaimana", "caranya"],
+    "bikin": ["buat", "membuat", "pembuatan"],
+    "bkin": ["buat", "membuat", "pembuatan"],
+    "ngurus": ["mengurus", "urus", "pengurusan"],
+    "ganti": ["ubah", "mengubah", "perubahan", "mengganti", "pergantian"],
+    "rubah": ["ubah", "mengubah", "perubahan"],
+    "perpanjang": ["perpanjangan", "memperpanjang"],
+    "daftar": ["mendaftar", "pendaftaran", "registrasi"],
+    "cetak": ["mencetak", "pencetakan", "print"],
+    "ambil": ["mengambil", "pengambilan"],
+    "syarat": ["persyaratan", "ketentuan", "dokumen"],
+    "berkas": ["dokumen", "file", "persyaratan"],
+    "prosedur": ["proses", "langkah", "tahapan", "alur"],
+    "biaya": ["tarif", "harga", "bayar", "ongkos"],
+    "gratis": ["bebas biaya", "tanpa biaya", "free"],
+    "lama": ["durasi", "waktu", "berapa hari"],
+    "cepat": ["kilat", "express", "segera"],
+    # Sinonim aksi
+    "buat": ["membuat", "pembuatan", "bikin"],
+    "urus": ["mengurus", "pengurusan", "ngurus"],
+    "ubah": ["mengubah", "perubahan", "ganti", "mengganti"],
+    "perbaiki": ["memperbaiki", "koreksi", "revisi"],
 }
 
 # Kategori dan keyword mapping
@@ -139,8 +165,12 @@ def tokenize_and_filter(text: str) -> List[str]:
 
 def keyword_overlap(question_a: str, question_b: str) -> float:
     """Hitung overlap score antara dua teks."""
-    question_a_expanded = expand_terms(question_a)
-    question_b_expanded = expand_terms(question_b)
+    # Normalize: hapus tanda baca sebelum expand
+    question_a_clean = re.sub(r"[^\w\s]", " ", question_a)
+    question_b_clean = re.sub(r"[^\w\s]", " ", question_b)
+    
+    question_a_expanded = expand_terms(question_a_clean)
+    question_b_expanded = expand_terms(question_b_clean)
     tokens_a = set(tokenize_and_filter(question_a_expanded))
     tokens_b = set(tokenize_and_filter(question_b_expanded))
     if not tokens_a or not tokens_b:

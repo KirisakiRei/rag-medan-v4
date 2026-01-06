@@ -88,42 +88,61 @@ def _extract_json(text: str) -> Optional[Dict]:
         cleaned_text = text.strip()
         original_text = cleaned_text  # Keep for logging
         
-        # Step 1: Remove markdown code blocks if present (```json ... ``` or ``` ... ```)
-        code_block_pattern = r"^```(?:json)?\s*\n?(.*?)\n?```$"
-        code_block_match = re.search(code_block_pattern, cleaned_text, re.DOTALL | re.IGNORECASE)
+        # Step 1: Remove markdown code blocks - multiple patterns for robustness
+        # Pattern 1: ```json\n{...}\n``` (standard)
+        # Pattern 2: ```\n{...}\n``` (no language specified)
+        # Pattern 3: ```json{...}``` (no newlines)
+        code_block_patterns = [
+            r"```json\s*\n?([\s\S]*?)\n?```",  # ```json ... ```
+            r"```\s*\n?([\s\S]*?)\n?```",       # ``` ... ```
+            r"```json([\s\S]*?)```",            # ```json...``` (no newlines)
+        ]
         
-        if code_block_match:
-            cleaned_text = code_block_match.group(1).strip()
-            logger.debug(f"[JSON PARSE] Stripped markdown code block, content: {cleaned_text[:100]}...")
+        for pattern in code_block_patterns:
+            match = re.search(pattern, cleaned_text, re.IGNORECASE)
+            if match:
+                cleaned_text = match.group(1).strip()
+                logger.debug(f"[JSON PARSE] Stripped code block with pattern, content length: {len(cleaned_text)}")
+                break
         
         # Step 2: Try direct JSON parse first (cleaner approach)
         try:
             result = json.loads(cleaned_text)
-            logger.debug(f"[JSON PARSE] Direct parse SUCCESS: {result}")
+            logger.debug(f"[JSON PARSE] Direct parse SUCCESS")
             return result
         except json.JSONDecodeError as e:
             logger.debug(f"[JSON PARSE] Direct parse failed: {e}, trying regex...")
         
-        # Step 3: Fallback - extract JSON object using regex
-        json_match = re.search(r"\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}", cleaned_text, re.DOTALL)
-        if not json_match:
-            # Try simpler pattern as last resort
-            json_match = re.search(r"\{.*\}", cleaned_text, re.DOTALL)
+        # Step 3: Fallback - extract JSON object using regex (find first complete JSON object)
+        # This handles cases where there's extra text before/after JSON
+        json_patterns = [
+            r"\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}",  # Nested objects
+            r"\{[^{}]+\}",                        # Simple object
+            r"\{.*?\}",                           # Lazy match
+        ]
         
-        if not json_match:
-            # Log full response for debugging
-            logger.warning(f"[JSON PARSE] No JSON found. Full LLM response:\n{original_text}")
-            return None
+        for pattern in json_patterns:
+            json_match = re.search(pattern, cleaned_text, re.DOTALL)
+            if json_match:
+                try:
+                    result = json.loads(json_match.group(0))
+                    logger.debug(f"[JSON PARSE] Regex parse SUCCESS with pattern")
+                    return result
+                except json.JSONDecodeError:
+                    continue
         
-        result = json.loads(json_match.group(0))
-        logger.debug(f"[JSON PARSE] Regex parse SUCCESS: {result}")
-        return result
+        # Log full response for debugging (single line for PM2)
+        safe_log = original_text.replace('\n', ' | ')[:300]
+        logger.warning(f"[JSON PARSE] No valid JSON found. Response: {safe_log}")
+        return None
         
     except json.JSONDecodeError as e:
-        logger.warning(f"[JSON PARSE] Invalid JSON structure: {e}. Text: {text[:200]}...")
+        safe_log = text.replace('\n', ' | ')[:200]
+        logger.warning(f"[JSON PARSE] Invalid JSON: {e}. Text: {safe_log}")
         return None
     except Exception as e:
-        logger.exception(f"[JSON PARSE] Unexpected error: {e}. Text: {text[:200]}...")
+        safe_log = text.replace('\n', ' | ')[:200]
+        logger.exception(f"[JSON PARSE] Unexpected error: {e}. Text: {safe_log}")
         return None
 
 
