@@ -33,7 +33,9 @@ module.exports = {
       interpreter: "none",
       env: {
         PYTHONPATH: __dirname,
-        ORCHESTRATOR_PORT: 5001
+        ORCHESTRATOR_PORT: 5001,
+        PYTHONMALLOC: "malloc",
+        MALLOC_TRIM_THRESHOLD_: "100000"
       },
       instances: 1,
       autorestart: true,
@@ -54,7 +56,9 @@ module.exports = {
       interpreter: "none",
       env: {
         PYTHONPATH: __dirname,
-        TEXT_SERVICE_PORT: 5010
+        TEXT_SERVICE_PORT: 5010,
+        PYTHONMALLOC: "malloc",
+        MALLOC_TRIM_THRESHOLD_: "100000"
       },
       instances: 1,
       autorestart: true,
@@ -75,7 +79,9 @@ module.exports = {
       interpreter: "none",
       env: {
         PYTHONPATH: __dirname,
-        DOCUMENT_SERVICE_PORT: 5011
+        DOCUMENT_SERVICE_PORT: 5011,
+        PYTHONMALLOC: "malloc",
+        MALLOC_TRIM_THRESHOLD_: "100000"
       },
       instances: 1,
       autorestart: true,
@@ -96,7 +102,9 @@ module.exports = {
       interpreter: "none",
       env: {
         PYTHONPATH: __dirname,
-        WEB_SERVICE_PORT: 5012
+        WEB_SERVICE_PORT: 5012,
+        PYTHONMALLOC: "malloc",
+        MALLOC_TRIM_THRESHOLD_: "100000"
       },
       instances: 1,
       autorestart: true,
@@ -117,7 +125,9 @@ module.exports = {
       interpreter: "none",
       env: {
         PYTHONPATH: __dirname,
-        USULAN_SERVICE_PORT: 5013
+        USULAN_SERVICE_PORT: 5013,
+        PYTHONMALLOC: "malloc",
+        MALLOC_TRIM_THRESHOLD_: "100000"
       },
       instances: 1,
       autorestart: true,
@@ -126,6 +136,30 @@ module.exports = {
       log_date_format: "YYYY-MM-DD HH:mm:ss",
       error_file: "./logs/rag-usulan-error.log",
       out_file: "./logs/rag-usulan-out.log",
+      merge_logs: true
+    },
+    
+    // ============== EMBEDDING SERVICE (optional, enable with USE_SHARED_EMBEDDING=true) ==============
+    {
+      name: "embedding-service",
+      script: pythonPath,
+      args: "-m uvicorn services.embedding_service.main:app --host 0.0.0.0 --port 5014",
+      cwd: __dirname,
+      interpreter: "none",
+      env: {
+        PYTHONPATH: __dirname,
+        EMBEDDING_SERVICE_PORT: 5014,
+        USE_SHARED_EMBEDDING: "true",
+        PYTHONMALLOC: "malloc",
+        MALLOC_TRIM_THRESHOLD_: "100000"
+      },
+      instances: 1,
+      autorestart: true,
+      watch: false,
+      max_memory_restart: "3G",
+      log_date_format: "YYYY-MM-DD HH:mm:ss",
+      error_file: "./logs/embedding-service-error.log",
+      out_file: "./logs/embedding-service-out.log",
       merge_logs: true
     }
   ]

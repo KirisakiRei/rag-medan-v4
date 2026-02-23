@@ -1,7 +1,4 @@
-"""
-RAG Web Service - Pydantic Models
-Request/Response models untuk rag_web service
-"""
+"""Pydantic models for rag_web service."""
 from typing import Optional, Any, List, Dict
 from pydantic import BaseModel, Field
 
@@ -9,17 +6,17 @@ from pydantic import BaseModel, Field
 # ============== REQUEST MODELS ==============
 
 class SearchRequest(BaseModel):
-    """Request dari orchestrator untuk search."""
+    """Request for search endpoint."""
     query: str
     limit: int = 5
 
 
 class UnifiedSearchRequest(BaseModel):
-    """Request dari orchestrator untuk unified search (parallel mode)."""
-    question: str  # Clean question dari orchestrator
-    original_question: str  # Pertanyaan asli user
+    """Request for unified search (parallel mode)."""
+    question: str
+    original_question: str
     wa_number: str = "unknown"
-    top_k: int = 3  # Number of candidates to return
+    top_k: int = 3
 
 
 class TriggerRequest(BaseModel):

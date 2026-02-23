@@ -4,16 +4,12 @@ Unified controller untuk semua RAG services dengan parallel search dan score-bas
 """
 import os
 import sys
-import time
-import asyncio
 import logging
-from typing import Dict, Any, Optional, List, Tuple
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
 import uvicorn
 import httpx
 
@@ -21,140 +17,35 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import config
 from shared.logging_config import setup_logging
-from shared.filtering import ai_pre_filter, ai_check_relevance
-from shared.utils import normalize_text, clean_location_terms, detect_category
 
-# Setup logging
+# Import modules
+from orchestrator.models import (
+    SearchRequest, SyncRequest, DocSearchRequest, DocSyncRequest, 
+    DocDeleteRequest, UsulanSyncRequest, UsulanSearchRequest,
+    WebTriggerRequest, WebSyncRequest, WebDeleteRequest, WebSearchRequest
+)
+from orchestrator.service_client import call_service, set_client, create_optimized_client
+from orchestrator.search_handler import unified_search
+
 logger = setup_logging("orchestrator")
 
-# HTTP client untuk komunikasi ke services
 http_client: httpx.AsyncClient = None
-
-
-# ============== REQUEST/RESPONSE MODELS (V2 COMPATIBLE) ==============
-
-class SearchRequest(BaseModel):
-    question: str
-    wa_number: str = "unknown"
-
-
-class SyncRequest(BaseModel):
-    action: str
-    content: Optional[Any] = None
-
-
-class DocSearchRequest(BaseModel):
-    query: str
-    limit: int = 5
-
-
-class DocSyncRequest(BaseModel):
-    doc_id: str
-    opd_name: Optional[str] = None
-    file_url: str
-
-
-class DocDeleteRequest(BaseModel):
-    doc_id: str
-
-
-class UsulanSyncRequest(BaseModel):
-    action: str
-    content: Optional[Any] = None
-
-
-class UsulanSearchRequest(BaseModel):
-    question: str
-    wa_number: str = "unknown"
-
-
-class WebTriggerRequest(BaseModel):
-    link_id: str
-    url: str
-    callback_url: Optional[str] = None
-    metadata: Optional[dict] = Field(default_factory=dict)
-
-
-class WebSyncRequest(BaseModel):
-    link_id: str
-    edited_content: str
-
-
-class WebDeleteRequest(BaseModel):
-    link_id: str
-
-
-class WebSearchRequest(BaseModel):
-    query: str
-    limit: int = 5
-
-
-# ============== SERVICE COMMUNICATION ==============
-
-async def call_service(
-    service_url: str, 
-    endpoint: str, 
-    method: str = "POST", 
-    data: dict = None,
-    timeout: float = 120.0
-) -> dict:
-    """Call internal service endpoint."""
-    url = f"{service_url}{endpoint}"
-    
-    try:
-        if method == "POST":
-            response = await http_client.post(url, json=data, timeout=timeout)
-        elif method == "GET":
-            response = await http_client.get(url, timeout=timeout)
-        elif method == "DELETE":
-            response = await http_client.request("DELETE", url, json=data, timeout=timeout)
-        else:
-            raise ValueError(f"Unsupported method: {method}")
-        
-        return response.json()
-        
-    except httpx.TimeoutException:
-        logger.error(f"[SERVICE] Timeout calling {url}")
-        return {"status": "error", "error": "Service timeout"}
-    except httpx.ConnectError:
-        logger.error(f"[SERVICE] Connection refused to {url}")
-        return {"status": "error", "error": "Service unavailable"}
-    except Exception as e:
-        logger.error(f"[SERVICE] Error calling {url}: {e}")
-        return {"status": "error", "error": str(e)}
-
-
-async def call_service_safe(
-    service_url: str,
-    endpoint: str,
-    method: str = "POST",
-    data: dict = None,
-    timeout: float = 60.0,
-    service_name: str = "unknown"
-) -> Tuple[str, dict]:
-    """Call service dengan safety wrapper, returns tuple (service_name, result)."""
-    try:
-        result = await call_service(service_url, endpoint, method, data, timeout)
-        return (service_name, result)
-    except Exception as e:
-        logger.error(f"[SERVICE] {service_name} error: {e}")
-        return (service_name, {"status": "error", "error": str(e)})
-
-
-# ============== INITIALIZATION ==============
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global http_client
     
     logger.info("Starting RAG Medan v3 - Orchestrator...")
-    http_client = httpx.AsyncClient()
+    http_client = create_optimized_client()  # Use optimized client
+    
+    # Set client for service_client module
+    set_client(http_client)
     
     logger.info("Orchestrator Started - PARALLEL SEARCH MODE")
-    logger.info(f"  - Text Service: {config.TEXT_SERVICE_URL}")
-    logger.info(f"  - Document Service: {config.DOCUMENT_SERVICE_URL}")
-    logger.info(f"  - Web Service: {config.WEB_SERVICE_URL}")
-    logger.info(f"  - Usulan Service: {config.USULAN_SERVICE_URL}")
+    logger.info(f"  Text: {config.TEXT_SERVICE_URL}")
+    logger.info(f"  Document: {config.DOCUMENT_SERVICE_URL}")
+    logger.info(f"  Web: {config.WEB_SERVICE_URL}")
+    logger.info(f"  Usulan: {config.USULAN_SERVICE_URL}")
     
     yield
     
@@ -177,12 +68,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
 # ============== HEALTH ENDPOINTS ==============
 
 @app.get("/")
 async def root():
-    """Root endpoint."""
     return {
         "message": "RAG Medan v3 - Orchestrator is running!",
         "version": "3.0.0",
@@ -200,28 +89,24 @@ async def health_check():
     """Health check - cek semua services."""
     services_status = {}
     
-    # Check text service
     try:
         text_health = await call_service(config.TEXT_SERVICE_URL, "/health", "GET", timeout=10.0)
         services_status["text_service"] = text_health.get("status") == "healthy"
     except:
         services_status["text_service"] = False
     
-    # Check document service
     try:
         doc_health = await call_service(config.DOCUMENT_SERVICE_URL, "/health", "GET", timeout=10.0)
         services_status["document_service"] = doc_health.get("status") == "healthy"
     except:
         services_status["document_service"] = False
     
-    # Check web service
     try:
         web_health = await call_service(config.WEB_SERVICE_URL, "/health", "GET", timeout=10.0)
         services_status["web_service"] = web_health.get("status") == "healthy"
     except:
         services_status["web_service"] = False
     
-    # Check usulan service
     try:
         usulan_health = await call_service(config.USULAN_SERVICE_URL, "/health", "GET", timeout=10.0)
         services_status["usulan_service"] = usulan_health.get("status") == "healthy"
@@ -237,16 +122,11 @@ async def health_check():
         "components": services_status
     }
 
-
-# ============== UNIFIED SEARCH (V3 PARALLEL MODE - OPTION B) ==============
+# ============== UNIFIED SEARCH ==============
 
 @app.post("/api/search")
-async def unified_search(request: SearchRequest):
-    """
-    Unified search dengan parallel execution dan score-based selection.
-    Returns hasil dengan score tertinggi yang relevant menurut AI check.
-    """
-    start_time = time.time()
+async def search_endpoint(request: SearchRequest):
+    """Unified search — parallel fan-out to all services, score-based selection."""
     user_question = (request.question or "").strip()
     wa_number = request.wa_number
 
@@ -256,375 +136,22 @@ async def unified_search(request: SearchRequest):
             content={"status": "error", "message": "Field 'question' wajib diisi"}
         )
 
-    logger.info("=" * 80)
-    logger.info(f"[USER-QUESTION] {user_question}")
-    logger.info(f"[WA-NUMBER] {wa_number}")
-    logger.info("=" * 80)
+    logger.info(f"[REQUEST] POST /api/search | wa={wa_number} | q='{user_question[:80]}'")
 
-    # =====================================================
-    # 1. PRE-FILTER DI ORCHESTRATOR
-    # =====================================================
-    logger.info("[AI-FILTER] Memulai Pre Filter Pertanyaan")
-    logger.info("-" * 80)
-    
-    pre_filter_start = time.time()
-    pre_filter_result = ai_pre_filter(user_question)
-    pre_filter_duration = time.time() - pre_filter_start
+    result = await unified_search(
+        user_question=user_question,
+        wa_number=wa_number,
+        use_ai_pre_filter=True
+    )
 
-    logger.info(f"[PRE-FILTER] Valid: {pre_filter_result.get('valid')} | Clean: {pre_filter_result.get('clean_question', '-')[:50]}...")
-    logger.info("=" * 80)
+    status = result.get("status", "?")
+    total_sec = result.get("timing", {}).get("total_sec", 0)
+    source = result.get("source", "-")
+    logger.info(f"[RESPONSE] status={status} | source={source} | total={total_sec}s | wa={wa_number}")
 
-    # Jika tidak valid dari pre-filter, return langsung
-    if not pre_filter_result.get("valid", True):
-        total_duration = time.time() - start_time
-        return JSONResponse(
-            status_code=200,
-            content={
-                "status": "low_confidence",
-                "message": pre_filter_result.get("reason", "Pertanyaan tidak relevan dengan layanan publik"),
-                "source": "none",
-                "data": {
-                    "similar_questions": [],
-                    "metadata": {
-                        "wa_number": wa_number,
-                        "original_question": user_question,
-                        "final_question": "-",
-                        "category": "-",
-                        "ai_reason": pre_filter_result.get("reason", "-"),
-                        "ai_reformulated": "-",
-                        "final_score_top": "-"
-                    }
-                },
-                "timing": {
-                    "ai_domain_sec": round(pre_filter_duration, 3),
-                    "ai_relevance_sec": 0.0,
-                    "embedding_sec": 0.0,
-                    "qdrant_sec": 0.0,
-                    "total_sec": round(total_duration, 3)
-                }
-            }
-        )
+    return JSONResponse(status_code=200, content=result)
 
-    # Normalize question
-    clean_question = pre_filter_result.get("clean_question", user_question)
-    normalized_question = normalize_text(clean_location_terms(clean_question))
-    detected_category = detect_category(normalized_question)
-
-    # =====================================================
-    # 2. PARALLEL CALL KE SEMUA SERVICES
-    # =====================================================
-    logger.info("[PARALLEL-SEARCH] Calling 3 services simultaneously")
-    logger.info("-" * 80)
-    logger.info(f"[QUERY] {normalized_question}")
-    parallel_start = time.time()
-
-    # Prepare parallel tasks
-    tasks = [
-        call_service_safe(
-            config.TEXT_SERVICE_URL,
-            "/internal/search-unified",
-            "POST",
-            {
-                "question": normalized_question,
-                "original_question": user_question,
-                "wa_number": wa_number,
-                "top_k": 3
-            },
-            timeout=60.0,
-            service_name="text"
-        ),
-        call_service_safe(
-            config.DOCUMENT_SERVICE_URL,
-            "/internal/search-unified",
-            "POST",
-            {
-                "question": normalized_question,
-                "original_question": user_question,
-                "wa_number": wa_number,
-                "top_k": 3
-            },
-            timeout=60.0,
-            service_name="document"
-        ),
-        call_service_safe(
-            config.WEB_SERVICE_URL,
-            "/internal/search-unified",
-            "POST",
-            {
-                "question": normalized_question,
-                "original_question": user_question,
-                "wa_number": wa_number,
-                "top_k": 3
-            },
-            timeout=60.0,
-            service_name="web"
-        )
-    ]
-
-    # Execute all tasks in parallel
-    results = await asyncio.gather(*tasks, return_exceptions=True)
-    parallel_duration = time.time() - parallel_start
-
-    # Parse results
-    service_results = {}
-    for result in results:
-        if isinstance(result, Exception):
-            logger.error(f"[PARALLEL] Exception: {result}")
-            continue
-        service_name, response = result
-        service_results[service_name] = response
-        status = response.get("status", "error")
-        count = response.get("data", {}).get("count", 0)
-        logger.info(f"  ✓ {service_name.upper()}: status={status}, candidates={count}")
-
-    logger.info("=" * 80)
-    
-    # =====================================================
-    # 3. AGGREGATE SEMUA HASIL
-    # =====================================================
-    logger.info("[AGGREGATE] Mengumpulkan semua candidates dari 3 services")
-    logger.info("-" * 80)
-    
-    all_candidates = []
-    
-    # Collect dari text service
-    text_result = service_results.get("text", {})
-    if text_result.get("status") == "has_candidates":
-        text_candidates = text_result.get("data", {}).get("results", [])
-        all_candidates.extend(text_candidates)
-        logger.info(f"[AGGREGATE] Text: {len(text_candidates)} candidates")
-    
-    # Collect dari document service
-    doc_result = service_results.get("document", {})
-    if doc_result.get("status") == "has_candidates":
-        doc_candidates = doc_result.get("data", {}).get("results", [])
-        all_candidates.extend(doc_candidates)
-        logger.info(f"[AGGREGATE] Document: {len(doc_candidates)} candidates")
-    
-    # Collect dari web service
-    web_result = service_results.get("web", {})
-    if web_result.get("status") == "has_candidates":
-        web_candidates = web_result.get("data", {}).get("results", [])
-        all_candidates.extend(web_candidates)
-        logger.info(f"[AGGREGATE] Web: {len(web_candidates)} candidates")
-    
-    logger.info(f"[AGGREGATE] Total candidates: {len(all_candidates)}")
-    logger.info("=" * 80)
-
-    # =====================================================
-    # 4. SORT BY FINAL_SCORE (DESCENDING)
-    # =====================================================
-    if all_candidates:
-        all_candidates.sort(key=lambda x: x.get("final_score", 0.0), reverse=True)
-        logger.info("[SORT] Top candidates by score:")
-        logger.info("-" * 80)
-        for i, c in enumerate(all_candidates[:5]):
-            logger.info(f"  [{i+1}] {c.get('source', '?').upper()} | score={c.get('final_score', 0):.4f}")
-        logger.info("=" * 80)
-
-    # =====================================================
-    # 5. AI RELEVANCE CHECK (DI ORCHESTRATOR SAJA)
-    # =====================================================
-    total_duration = time.time() - start_time
-    
-    if not all_candidates:
-        # Tidak ada candidates sama sekali
-        logger.info("[RESULT] No candidates from any service")
-        return JSONResponse(
-            status_code=200,
-            content={
-                "status": "low_confidence",
-                "message": "Tidak ada hasil ditemukan dari semua sumber",
-                "source": "none",
-                "data": {
-                    "similar_questions": [],
-                    "metadata": {
-                        "wa_number": wa_number,
-                        "original_question": user_question,
-                        "final_question": normalized_question,
-                        "category": detected_category.get("name", "Global") if detected_category else "Global",
-                        "ai_reason": "Tidak ada kandidat dari text, document, dan web",
-                        "ai_reformulated": "-",
-                        "final_score_top": "-"
-                    }
-                },
-                "timing": {
-                    "ai_domain_sec": round(pre_filter_duration, 3),
-                    "ai_relevance_sec": 0.0,
-                    "embedding_sec": 0.0,
-                    "qdrant_sec": 0.0,
-                    "parallel_search_sec": round(parallel_duration, 3),
-                    "total_sec": round(total_duration, 3)
-                }
-            }
-        )
-    
-    # Check top candidates untuk relevance
-    logger.info("[AI-RELEVANCE] Checking top candidates")
-    logger.info("-" * 80)
-    
-    relevance_start = time.time()
-    selected_candidate = None
-    ai_reason = "-"
-    candidates_checked = 0
-    
-    # Check top 3 candidates (atau semua jika kurang dari 3)
-    max_check = min(3, len(all_candidates))
-    
-    for idx, candidate in enumerate(all_candidates[:max_check]):
-        candidates_checked += 1
-        source = candidate.get("source", "unknown")
-        score = candidate.get("final_score", 0)
-        content_for_check = candidate.get("content_for_check", "")
-        
-        # Jika score sangat tinggi (dense >= 0.90), skip AI check (trust score)
-        if candidate.get("dense_score", 0) >= 0.90:
-            logger.info(f"  [{idx+1}] {source.upper()}: score={score:.4f} → HIGH SCORE, SKIP AI CHECK ✓")
-            selected_candidate = candidate
-            ai_reason = f"High confidence score (dense >= 0.90)"
-            break
-        
-        # AI Relevance Check
-        logger.info(f"  [{idx+1}] {source.upper()}: score={score:.4f} → Checking relevance...")
-        relevance_result = ai_check_relevance(user_question, content_for_check)
-        
-        is_relevant = relevance_result.get("relevant", False)
-        ai_reason = relevance_result.get("reason", "-")
-        
-        if is_relevant:
-            logger.info(f"       → RELEVANT ✓")
-            selected_candidate = candidate
-            break
-        else:
-            logger.info(f"       → NOT RELEVANT ✗ (trying next...)")
-    
-    logger.info("=" * 80)
-    
-    relevance_duration = time.time() - relevance_start
-    total_duration = time.time() - start_time
-
-    # =====================================================
-    # 6. BUILD RESPONSE
-    # =====================================================
-    
-    if selected_candidate:
-        # SUCCESS - Ada candidate relevant
-        source = selected_candidate.get("source", "unknown")
-        
-        # Build similar_questions format (V2 compatible)
-        similar_question = {
-            "question": selected_candidate.get("question", "-"),
-            "question_rag_name": selected_candidate.get("question", "-"),
-            "answer_id": selected_candidate.get("answer_id"),
-            "answer_doc": selected_candidate.get("answer_doc", ""),
-            "category_id": selected_candidate.get("category_id"),
-            "dense_score": selected_candidate.get("dense_score", 0.0),
-            "overlap_score": selected_candidate.get("overlap_score", 0.0),
-            "final_score": selected_candidate.get("final_score", 0.0),
-            "note": selected_candidate.get("note", "-")
-        }
-        
-        # Source-specific info
-        web_info = selected_candidate.get("web_info")
-        document_info = selected_candidate.get("document_info")
-        
-        response_payload = {
-            "status": "success",
-            "message": f"Hasil ditemukan dari {source}",
-            "source": source,
-            "data": {
-                "similar_questions": [similar_question],
-                "metadata": {
-                    "wa_number": wa_number,
-                    "original_question": user_question,
-                    "final_question": normalized_question,
-                    "category": detected_category.get("name", "Global") if detected_category else "Global",
-                    "ai_reason": ai_reason,
-                    "ai_reformulated": "-",
-                    "final_score_top": selected_candidate.get("final_score", 0.0),
-                    "candidates_checked": candidates_checked,
-                    "total_candidates": len(all_candidates)
-                }
-            },
-            "timing": {
-                "ai_domain_sec": round(pre_filter_duration, 3),
-                "ai_relevance_sec": round(relevance_duration, 3),
-                "parallel_search_sec": round(parallel_duration, 3),
-                "total_sec": round(total_duration, 3)
-            }
-        }
-        
-        # Add source-specific metadata
-        if web_info:
-            response_payload["data"]["metadata"]["web_info"] = web_info
-        if document_info:
-            response_payload["data"]["metadata"]["document_info"] = document_info
-        
-        logger.info("[RESULT] SUCCESS ✓")
-        logger.info(f"  Source: {source.upper()}")
-        logger.info(f"  Score: {selected_candidate.get('final_score', 0):.4f}")
-        logger.info(f"  Candidates Checked: {candidates_checked}/{len(all_candidates)}")
-        logger.info(f"  Total Time: {total_duration:.3f}s")
-        logger.info("=" * 80)
-        
-        return JSONResponse(status_code=200, content=response_payload)
-    
-    else:
-        # LOW_CONFIDENCE - Semua candidates tidak relevant
-        # Return top candidate untuk informasi
-        top_candidate = all_candidates[0] if all_candidates else {}
-        source = top_candidate.get("source", "none")
-        
-        similar_question = {
-            "question": top_candidate.get("question", "-"),
-            "question_rag_name": top_candidate.get("question", "-"),
-            "answer_id": top_candidate.get("answer_id"),
-            "answer_doc": top_candidate.get("answer_doc", "")[:500] + "..." if len(top_candidate.get("answer_doc", "")) > 500 else top_candidate.get("answer_doc", ""),
-            "category_id": top_candidate.get("category_id"),
-            "dense_score": top_candidate.get("dense_score", 0.0),
-            "overlap_score": top_candidate.get("overlap_score", 0.0),
-            "final_score": top_candidate.get("final_score", 0.0),
-            "note": f"not_relevant_checked_{candidates_checked}"
-        }
-        
-        response_payload = {
-            "status": "low_confidence",
-            "message": "Tidak ada hasil yang cukup relevan",
-            "source": source,
-            "data": {
-                "similar_questions": [similar_question] if top_candidate else [],
-                "metadata": {
-                    "wa_number": wa_number,
-                    "original_question": user_question,
-                    "final_question": normalized_question,
-                    "category": detected_category.get("name", "Global") if detected_category else "Global",
-                    "ai_reason": ai_reason,
-                    "ai_reformulated": "-",
-                    "final_score_top": top_candidate.get("final_score", "-") if top_candidate else "-",
-                    "candidates_checked": candidates_checked,
-                    "total_candidates": len(all_candidates)
-                }
-            },
-            "timing": {
-                "ai_domain_sec": round(pre_filter_duration, 3),
-                "ai_relevance_sec": round(relevance_duration, 3),
-                "parallel_search_sec": round(parallel_duration, 3),
-                "total_sec": round(total_duration, 3)
-            }
-        }
-        
-        best_score = top_candidate.get('final_score', 0) if top_candidate else 0
-        logger.info("[RESULT] LOW_CONFIDENCE ✗")
-        logger.info(f"  Best Source: {source.upper()}")
-        logger.info(f"  Best Score: {best_score:.4f}")
-        logger.info(f"  Candidates Checked: {candidates_checked}/{len(all_candidates)}")
-        logger.info(f"  Total Time: {total_duration:.3f}s")
-        logger.info("=" * 80)
-        
-        return JSONResponse(status_code=200, content=response_payload)
-
-
-# ============== TEXT RAG SYNC (V2 COMPATIBLE) ==============
+# ============== TEXT RAG SYNC ==============
 
 @app.post("/api/sync")
 async def sync_data(request: SyncRequest):
@@ -640,8 +167,7 @@ async def sync_data(request: SyncRequest):
     
     return JSONResponse(status_code=200, content=result)
 
-
-# ============== DOCUMENT RAG ENDPOINTS (V2 COMPATIBLE) ==============
+# ============== DOCUMENT RAG ENDPOINTS ==============
 
 @app.post("/api/doc-search")
 async def doc_search(request: DocSearchRequest):
@@ -723,8 +249,7 @@ async def doc_delete(request: DocDeleteRequest):
     
     return result
 
-
-# ============== USULAN RAG ENDPOINTS (V2 COMPATIBLE) ==============
+# ============== USULAN RAG ENDPOINTS ==============
 
 @app.post("/api/sync-usulan")
 async def sync_usulan(request: UsulanSyncRequest):
@@ -761,14 +286,11 @@ async def search_usulan(request: UsulanSearchRequest):
     
     return JSONResponse(status_code=200, content=result)
 
-
-# ============== WEB RAG ENDPOINTS (NEW IN V3) ==============
+# ============== WEB RAG ENDPOINTS ==============
 
 @app.post("/api/web-trigger")
 async def trigger_web_scraping(request: WebTriggerRequest):
-    """
-    Trigger web scraping (NEW in v3).
-    """
+    """Trigger web scraping."""
     logger.info(f"[WEB-TRIGGER] link_id={request.link_id}, url={request.url}")
     
     result = await call_service(
@@ -788,9 +310,7 @@ async def trigger_web_scraping(request: WebTriggerRequest):
 
 @app.post("/api/web-sync")
 async def sync_web_content(request: WebSyncRequest):
-    """
-    Sync edited web content (NEW in v3).
-    """
+    """Sync edited web content."""
     logger.info(f"[WEB-SYNC] link_id={request.link_id}")
     
     result = await call_service(
@@ -805,9 +325,7 @@ async def sync_web_content(request: WebSyncRequest):
 
 @app.delete("/api/web-delete")
 async def delete_web_content(request: WebDeleteRequest):
-    """
-    Delete web content (NEW in v3).
-    """
+    """Delete web content."""
     logger.info(f"[WEB-DELETE] link_id={request.link_id}")
     
     result = await call_service(
@@ -822,9 +340,7 @@ async def delete_web_content(request: WebDeleteRequest):
 
 @app.post("/api/web-search")
 async def search_web(request: WebSearchRequest):
-    """
-    Search di RAG Web (web_scraping_bank) (NEW in v3).
-    """
+    """Search di RAG Web (web_scraping_bank)."""
     logger.info(f"[WEB-SEARCH] query={request.query}")
     
     result = await call_service(

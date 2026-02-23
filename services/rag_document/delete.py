@@ -1,8 +1,3 @@
-"""
-RAG Document Service - Delete Module
-Logic delete dokumen dari document_bank
-PAYLOAD DAN RESPONSE HARUS PERSIS SEPERTI V2!
-"""
 import os
 import sys
 import logging
@@ -18,30 +13,24 @@ from config import config
 
 logger = logging.getLogger("rag_document.delete")
 
-# Global instance (diinisialisasi dari main.py)
 qdrant: AsyncQdrantClient = None
 
 
 def set_instances(qdrant_client: AsyncQdrantClient):
-    """Set global instance dari main.py"""
+    """Set global instance."""
     global qdrant
     qdrant = qdrant_client
 
 
 async def soft_delete_document(doc_id: str) -> Dict[str, Any]:
-    """
-    Soft delete dokumen berdasarkan doc_id.
-    Set is_deleted=True pada semua chunks.
-    RESPONSE PERSIS SEPERTI V2!
-    """
+
     try:
-        # PERSIS V2: menggunakan mysql_id sebagai key
         results = await qdrant.scroll(
             collection_name=config.COLLECTION_DOCUMENT,
             scroll_filter=qdrant_models.Filter(
                 must=[
                     qdrant_models.FieldCondition(
-                        key="mysql_id",  # PERSIS V2: mysql_id bukan doc_id
+                        key="mysql_id",
                         match=qdrant_models.MatchValue(value=doc_id)
                     )
                 ]
@@ -53,7 +42,6 @@ async def soft_delete_document(doc_id: str) -> Dict[str, Any]:
         points = results[0] if results else []
         
         if not points:
-            # RESPONSE PERSIS V2:
             return {"status": "not_found", "deleted": 0}
         
         point_ids = [p.id for p in points]
@@ -69,20 +57,14 @@ async def soft_delete_document(doc_id: str) -> Dict[str, Any]:
         
         logger.info(f"[SOFT-DELETE] Soft deleted {len(point_ids)} chunks for doc_id={doc_id}")
         
-        # RESPONSE PERSIS V2:
         return {"status": "deleted", "deleted": len(point_ids)}
         
     except Exception as e:
         logger.exception(f"[SOFT-DELETE] Error: {e}")
-        # RESPONSE PERSIS V2:
         return {"status": "error", "error": str(e)}
 
 
 async def hard_delete_document(doc_id: str) -> Dict[str, Any]:
-    """
-    Hard delete dokumen berdasarkan doc_id.
-    Hapus permanen dari Qdrant.
-    """
     try:
         # Get all chunks with mysql_id
         results = await qdrant.scroll(

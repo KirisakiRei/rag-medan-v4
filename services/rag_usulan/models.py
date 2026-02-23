@@ -1,7 +1,4 @@
-"""
-RAG Usulan Service - Pydantic Models
-Request/Response models untuk rag_usulan service
-"""
+"""Pydantic models for rag_usulan service."""
 from typing import Optional, Any, List, Dict
 from pydantic import BaseModel, Field
 
@@ -9,14 +6,14 @@ from pydantic import BaseModel, Field
 # ============== REQUEST MODELS ==============
 
 class SearchRequest(BaseModel):
-    """Request dari orchestrator untuk search."""
+    """Request for search endpoint."""
     question: str
     wa_number: str = "unknown"
 
 
 class SyncRequest(BaseModel):
-    """Request untuk sync usulan_bank."""
-    action: str  # bulk_sync, add, update, delete
+    """Request for sync operations."""
+    action: str
     content: Optional[Any] = None
 
 
@@ -43,7 +40,7 @@ class SearchResultItem(BaseModel):
 
 
 class SearchMetadata(BaseModel):
-    """Metadata dari search."""
+    """Search metadata."""
     wa_number: str
     original_question: str
     final_question: str

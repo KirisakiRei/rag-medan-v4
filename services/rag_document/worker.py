@@ -1,8 +1,3 @@
-"""
-RAG Document Service - OCR Worker
-Subprocess worker untuk OCR dan indexing dokumen
-Dijalankan sebagai subprocess dari sync module
-"""
 import os
 import sys
 import argparse

@@ -1,60 +1,33 @@
-"""
-RAG Document Service - Pydantic Models
-Request/Response models untuk rag_document service
-PERSIS SEPERTI V2!
-"""
 from typing import Optional, Any, List, Dict
 from pydantic import BaseModel, Field
 
 
-# ============== REQUEST MODELS (PERSIS V2) ==============
+# ============== REQUEST MODELS ==============
 
 class SearchRequest(BaseModel):
-    """Request dari orchestrator untuk search. (PERSIS V2: DocSearchRequest)"""
+    """Request for document search."""
     query: str
     limit: int = 5
 
 
 class UnifiedSearchRequest(BaseModel):
-    """Request dari orchestrator untuk unified search (parallel mode)."""
-    question: str  # Clean question dari orchestrator
-    original_question: str  # Pertanyaan asli user
+    """Request for unified search (parallel mode)."""
+    question: str
+    original_question: str
     wa_number: str = "unknown"
-    top_k: int = 3  # Number of candidates to return
+    top_k: int = 3
 
 
 class SyncRequest(BaseModel):
-    """Request untuk sync document. (PERSIS V2: DocSyncRequest)"""
+    """Request for document sync."""
     doc_id: str
-    opd_name: Optional[str] = None  # PERSIS V2
+    opd_name: Optional[str] = None
     file_url: str
 
 
 class DeleteRequest(BaseModel):
-    """Request untuk delete document. (PERSIS V2: DocDeleteRequest)"""
+    """Request for document delete."""
     doc_id: str
 
 
-# ============== RESPONSE MODELS (PERSIS V2) ==============
-
-# Note: V2 doc-search returns format ini:
-# {
-#     "status": "success" | "empty",
-#     "mode": "direct" | "post-summary",
-#     "query": "...",
-#     "results": [
-#         {
-#             "doc_id": ...,      -> mysql_id di V2
-#             "opd": ...,
-#             "filename": ...,
-#             "page_number": ...,
-#             "chunk_index": ...,
-#             "section": ...,
-#             "summary": ...,
-#             "text": ...,
-#             "score": ...
-#         }
-#     ],
-#     # jika post-summary mode:
-#     "summary": "..."
-# }
+# ============== RESPONSE MODELS ==============

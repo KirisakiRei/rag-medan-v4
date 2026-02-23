@@ -19,10 +19,7 @@ def _get_connection():
 
 
 def get_variable(name: str) -> str | None:
-    """
-    Mengambil content dari table `variables` berdasarkan `name`.
-    Return None jika tidak ada / gagal koneksi (biar fallback ke default prompt).
-    """
+    """Get content from `variables` table by name. Returns None if not found."""
     try:
         conn = _get_connection()
         cur = conn.cursor()
@@ -50,7 +47,7 @@ def execute_query(query: str, params: tuple = None) -> list:
         cur.close()
         conn.close()
         return results
-    except Error as e:
+    except Error:
         return []
 
 
@@ -64,5 +61,5 @@ def execute_update(query: str, params: tuple = None) -> bool:
         cur.close()
         conn.close()
         return True
-    except Error as e:
+    except Error:
         return False

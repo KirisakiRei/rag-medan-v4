@@ -1,8 +1,3 @@
-"""
-RAG Text Service - Search Module
-Logic pencarian di knowledge_bank dengan score-based selection.
-Returns top 3 scored results untuk orchestrator aggregate.
-"""
 import os
 import sys
 import time
@@ -22,18 +17,18 @@ from shared.utils import (
     keyword_overlap,
     detect_category,
     safe_parse_answer_id,
+    encode_texts,
 )
-from shared.filtering import ai_pre_filter  # ONLY pre-filter, NO ai_check_relevance
+from shared.filtering import ai_pre_filter
 
 logger = logging.getLogger("rag_text.search")
 
-# Global instances (diinisialisasi dari main.py)
 model: SentenceTransformer = None
 qdrant: AsyncQdrantClient = None
 
 
 def set_instances(embedding_model: SentenceTransformer, qdrant_client: AsyncQdrantClient):
-    """Set global instances dari main.py"""
+    """Set global instances."""
     global model, qdrant
     model = embedding_model
     qdrant = qdrant_client
@@ -47,17 +42,10 @@ async def search_knowledge_bank(
     skip_prefilter: bool = False,
     top_k: int = 3
 ) -> Dict[str, Any]:
-    """Search di knowledge_bank, return top K scored results untuk orchestrator."""
+    """Search knowledge_bank, return top-K scored results."""
     start_time = time.time()
     user_question = (question or "").strip()
-    whatsapp_number = wa_number
-    
-    # Jika dipanggil dari orchestrator dengan skip_prefilter=True,
-    # question sudah clean, dan original_question adalah pertanyaan asli
-    if skip_prefilter and original_question:
-        display_question = original_question
-    else:
-        display_question = user_question
+    display_question = original_question if (skip_prefilter and original_question) else user_question
 
     if not user_question:
         return {
@@ -68,14 +56,14 @@ async def search_knowledge_bank(
 
     logger.info(f"[TEXT-SEARCH] Question: {display_question[:50]}...")
 
-    pre_filter_start = time.time()
     pre_filter_duration = 0.0
     
     if skip_prefilter:
         logger.info("[PRE-FILTER] Skipped (handled by orchestrator)")
         pre_filter_result = {"valid": True, "clean_question": user_question}
     else:
-        pre_filter_result = ai_pre_filter(user_question)
+        pre_filter_start = time.time()
+        pre_filter_result = await ai_pre_filter(user_question)
         pre_filter_duration = time.time() - pre_filter_start
 
         if not pre_filter_result.get("valid", True):
@@ -87,7 +75,7 @@ async def search_knowledge_bank(
                 "data": {
                     "results": [],
                     "metadata": {
-                        "wa_number": whatsapp_number,
+                        "wa_number": wa_number,
                         "original_question": display_question,
                         "final_question": "-",
                         "category": "-"
@@ -106,7 +94,7 @@ async def search_knowledge_bank(
     category_id = detected_category["id"] if detected_category else None
 
     embedding_start = time.time()
-    query_vector = model.encode("query: " + normalized_question).tolist()
+    [query_vector] = await encode_texts([normalized_question], model=model, prefix="query: ")
     embedding_duration = time.time() - embedding_start
 
     qdrant_start = time.time()
@@ -184,7 +172,7 @@ async def search_knowledge_bank(
                 "results": top_results,
                 "count": len(top_results),
                 "metadata": {
-                    "wa_number": whatsapp_number,
+                    "wa_number": wa_number,
                     "original_question": display_question,
                     "final_question": normalized_question,
                     "category": detected_category["name"] if detected_category else "Global"
@@ -206,7 +194,7 @@ async def search_knowledge_bank(
                 "results": [],
                 "count": 0,
                 "metadata": {
-                    "wa_number": whatsapp_number,
+                    "wa_number": wa_number,
                     "original_question": display_question,
                     "final_question": normalized_question,
                     "category": detected_category["name"] if detected_category else "Global"

@@ -1,8 +1,3 @@
-"""
-RAG Document Service - Sync Module
-Logic sinkronisasi dokumen (OCR) ke document_bank
-PAYLOAD DAN RESPONSE HARUS PERSIS SEPERTI V2!
-"""
 import os
 import sys
 import time
@@ -22,13 +17,13 @@ logger = logging.getLogger("rag_document.sync")
 
 ALLOWED_EXTENSIONS = ['.pdf', '.docx', '.xlsx', '.jpg', '.jpeg', '.png']
 
-# Task status tracker (thread-safe) - PERSIS V2
+# Task status tracker
 task_status: Dict[str, dict] = {}
 task_lock = threading.Lock()
 
 
 def update_task_status(task_id: str, status: str, result: dict = None):
-    """Update status task. (PERSIS V2)"""
+    """Update task status."""
     with task_lock:
         task_status[task_id] = {
             "status": status,
@@ -39,34 +34,29 @@ def update_task_status(task_id: str, status: str, result: dict = None):
 
 
 def get_task_status(task_id: str) -> Optional[Dict[str, Any]]:
-    """Get task status. (PERSIS V2)"""
+    """Get task status."""
     with task_lock:
         return task_status.get(task_id)
 
 
 def get_all_tasks() -> Dict[str, dict]:
-    """Get all tasks. (PERSIS V2)"""
+    """Get all tasks."""
     with task_lock:
         return {"tasks": task_status}
 
 
 def run_ocr_subprocess(task_id: str, params: dict):
-    """Run OCR di subprocess terpisah. (PERSIS V2)"""
+    """Run OCR in a separate subprocess."""
     try:
         logger.info(f"[SUBPROCESS] Starting OCR subprocess for {task_id}")
         update_task_status(task_id, "processing")
         
-        # Path ke worker script
+        # Path to worker script
         worker_script = os.path.join(os.path.dirname(__file__), "worker.py")
         worker_script = os.path.abspath(worker_script)
         
         # Working directory
         work_dir = os.path.dirname(os.path.dirname(os.path.dirname(worker_script)))
-        
-        logger.info(f"[SUBPROCESS] Worker: {worker_script}")
-        logger.info(f"[SUBPROCESS] Work dir: {work_dir}")
-        
-        # Run subprocess
         process = subprocess.Popen(
             [sys.executable, worker_script],
             stdin=subprocess.PIPE,
@@ -76,9 +66,9 @@ def run_ocr_subprocess(task_id: str, params: dict):
             env={**os.environ, "PYTHONPATH": work_dir}
         )
         
-        # Send params dan tunggu hasil
+        # Send params and wait for result
         input_data = json.dumps(params).encode('utf-8')
-        stdout, stderr = process.communicate(input=input_data, timeout=600)  # 10 menit timeout
+        stdout, stderr = process.communicate(input=input_data, timeout=600)
         
         if stderr:
             logger.info(f"[SUBPROCESS] Stderr: {stderr.decode('utf-8', errors='ignore')}")
@@ -113,20 +103,14 @@ async def sync_document(
     file_url: str,
     opd_name: Optional[str] = None
 ) -> Dict[str, Any]:
-    """
-    Sync document - trigger OCR worker sebagai subprocess.
-    RESPONSE PERSIS SEPERTI V2!
-    
-    Returns:
-        Dict dengan task_id untuk tracking
-    """
+    """Sync document — trigger OCR worker as subprocess."""
     logger.info(f"[API] ========== DOC-SYNC START ==========")
     logger.info(f"[API] doc_id={doc_id}")
     logger.info(f"[API] opd={opd_name}")
     logger.info(f"[API] file_url={file_url}")
     sys.stdout.flush()
     
-    # Validasi file extension
+    # Validate file extension
     file_ext = os.path.splitext(file_url)[1].lower()
     if file_ext not in ALLOWED_EXTENSIONS:
         return {
@@ -134,7 +118,7 @@ async def sync_document(
             "message": f"Tipe file tidak didukung. Allowed: {', '.join(ALLOWED_EXTENSIONS)}"
         }
     
-    # Validasi file exists
+    # Validate file exists
     file_path = file_url
     if file_path.startswith("file://"):
         file_path = file_path.replace("file://", "")
@@ -154,7 +138,7 @@ async def sync_document(
     task_id = f"{doc_id}_{int(time.time())}"
     update_task_status(task_id, "queued")
     
-    # Prepare params untuk subprocess
+    # Prepare params for subprocess
     params = {
         "doc_id": doc_id,
         "opd_name": opd_name,
@@ -163,7 +147,7 @@ async def sync_document(
         "collection_name": config.COLLECTION_DOCUMENT
     }
     
-    # Start subprocess di background thread
+    # Start subprocess in background thread
     thread = threading.Thread(
         target=run_ocr_subprocess,
         args=(task_id, params),
@@ -173,7 +157,6 @@ async def sync_document(
     
     logger.info(f"[API] Task queued: {task_id}")
     
-    # RESPONSE PERSIS V2:
     return {
         "status": "queued",
         "task_id": task_id,

@@ -1,9 +1,8 @@
-"""
-RAG Text Service - Main Application
-FastAPI app untuk RAG Text (knowledge_bank)
-"""
 import os
 import sys
+import gc
+import time
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 
@@ -20,7 +19,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 from config import config
 from shared.logging_config import setup_logging
 
-# Import modules
 from services.rag_text import search as search_module
 from services.rag_text import sync as sync_module
 from services.rag_text.models import SearchRequest, UnifiedSearchRequest, SyncRequest
@@ -28,9 +26,56 @@ from services.rag_text.models import SearchRequest, UnifiedSearchRequest, SyncRe
 # Setup logging
 logger = setup_logging("rag_text")
 
-# Global instances
-model: SentenceTransformer = None
+_model: SentenceTransformer = None
+_model_lock = asyncio.Lock()
+_last_model_used: float = 0.0
 qdrant: AsyncQdrantClient = None
+
+
+async def get_model() -> SentenceTransformer:
+    """
+    Lazy load embedding model with thundering herd protection.
+    If USE_SHARED_EMBEDDING is True, this should not be called (use encode_texts instead).
+    """
+    global _model, _last_model_used
+    
+    if _model is not None:
+        _last_model_used = time.time()
+        return _model
+    
+    async with _model_lock:
+        # Double-check after acquiring lock (another request may have loaded it)
+        if _model is not None:
+            _last_model_used = time.time()
+            return _model
+        
+        logger.info("Loading embedding model (lazy)...")
+        _model = SentenceTransformer(config.EMBEDDING_MODEL_PATH)
+        _last_model_used = time.time()
+        logger.info(f"Model loaded: {config.EMBEDDING_MODEL_PATH}")
+        
+        # Update module references
+        search_module.set_instances(_model, qdrant)
+        sync_module.set_instances(_model, qdrant)
+        
+        return _model
+
+
+async def _idle_unload_loop():
+    """Background task: unload model after IDLE_TIMEOUT seconds of inactivity."""
+    global _model, _last_model_used
+    while True:
+        await asyncio.sleep(300)  # Check every 5 minutes
+        if _model is not None and _last_model_used > 0:
+            idle_seconds = time.time() - _last_model_used
+            if idle_seconds > config.MODEL_IDLE_TIMEOUT:
+                async with _model_lock:
+                    if _model is not None and (time.time() - _last_model_used) > config.MODEL_IDLE_TIMEOUT:
+                        logger.info(f"Model idle for {idle_seconds:.0f}s > {config.MODEL_IDLE_TIMEOUT}s, unloading...")
+                        del _model
+                        _model = None
+                        gc.collect()
+                        logger.info("Model unloaded, RAM freed")
 
 
 async def init_qdrant():
@@ -42,14 +87,19 @@ async def init_qdrant():
             host=config.QDRANT_HOST,
             port=config.QDRANT_PORT,
             api_key=config.QDRANT_API_KEY,
+            grpc_port=None,
+            prefer_grpc=False,
+            timeout=60
         )
     else:
         qdrant = AsyncQdrantClient(
             host=config.QDRANT_HOST,
             port=config.QDRANT_PORT,
+            grpc_port=None,
+            prefer_grpc=False,
+            timeout=60
         )
     
-    # Ensure collection exists
     try:
         collections = await qdrant.get_collections()
         collection_names = [c.name for c in collections.collections]
@@ -69,30 +119,23 @@ async def init_qdrant():
     logger.info(f"Qdrant connected: {config.QDRANT_HOST}:{config.QDRANT_PORT}")
 
 
-def init_model():
-    """Initialize embedding model."""
-    global model
-    logger.info("Loading embedding model...")
-    model = SentenceTransformer(config.EMBEDDING_MODEL_PATH)
-    logger.info(f"Model loaded: {config.EMBEDDING_MODEL_PATH}")
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Application lifespan."""
-    # Startup
-    init_model()
+    """Application lifespan — model is lazy loaded on first request."""
     await init_qdrant()
     
-    # Set instances ke modules
-    search_module.set_instances(model, qdrant)
-    sync_module.set_instances(model, qdrant)
+    # Start idle unload background task
+    idle_task = asyncio.create_task(_idle_unload_loop())
     
     logger.info(f"RAG Text Service Started on port {config.TEXT_SERVICE_PORT}")
+    logger.info(f"  Model loading: LAZY (will load on first request)")
+    logger.info(f"  Idle timeout: {config.MODEL_IDLE_TIMEOUT}s")
+    logger.info(f"  Shared embedding: {config.USE_SHARED_EMBEDDING}")
     
     yield
     
     # Shutdown
+    idle_task.cancel()
     logger.info("RAG Text Service Shutting down...")
 
 
@@ -109,11 +152,15 @@ app = FastAPI(
 @app.get("/health")
 async def health_check():
     """Health check endpoint."""
-    try:
-        _ = model.encode("test").tolist()
-        model_ok = True
-    except:
-        model_ok = False
+    model_loaded = _model is not None
+    model_ok = False
+    
+    if model_loaded:
+        try:
+            _ = _model.encode("test").tolist()
+            model_ok = True
+        except:
+            pass
     
     try:
         await qdrant.get_collections()
@@ -121,13 +168,15 @@ async def health_check():
     except:
         qdrant_ok = False
     
-    status = "healthy" if model_ok and qdrant_ok else "unhealthy"
+    # Service is healthy if qdrant is connected (model will lazy load)
+    status = "healthy" if qdrant_ok else "unhealthy"
     
     return {
         "status": status,
         "service": "rag_text",
         "components": {
             "embedding_model": model_ok,
+            "model_loaded": model_loaded,
             "qdrant": qdrant_ok
         }
     }
@@ -135,14 +184,10 @@ async def health_check():
 
 @app.post("/internal/search")
 async def internal_search(request: SearchRequest):
-    """
-    Internal search endpoint - dipanggil oleh orchestrator (direct mode).
-    TIDAK ada fallback - hanya search di knowledge_bank.
-    
-    Jika skip_prefilter=True, pre-filter sudah dilakukan di orchestrator
-    dan question adalah clean_question.
-    """
     logger.info(f"[SEARCH] Question: {request.question[:50]}... | skip_prefilter: {request.skip_prefilter}")
+    
+    model = await get_model()
+    search_module.set_instances(model, qdrant)
     
     result = await search_module.search_knowledge_bank(
         question=request.question,
@@ -157,17 +202,19 @@ async def internal_search(request: SearchRequest):
 @app.post("/internal/search-unified")
 async def internal_search_unified(request: UnifiedSearchRequest):
     """
-    Internal search endpoint untuk unified/parallel mode.
-    Dipanggil oleh orchestrator saat /api/search.
-    Return format: kandidat dengan scoring untuk post-filter di orchestrator.
+    Internal search endpoint for unified/parallel mode.
+    Called by orchestrator for /api/search.
     """
     logger.info(f"[SEARCH-UNIFIED] Question: {request.question[:50]}...")
+    
+    model = await get_model()
+    search_module.set_instances(model, qdrant)
     
     result = await search_module.search_knowledge_bank(
         question=request.question,
         wa_number=request.wa_number,
         original_question=request.original_question,
-        skip_prefilter=True,  # Sudah di-prefilter di orchestrator
+        skip_prefilter=True,
         top_k=request.top_k
     )
     
@@ -177,9 +224,12 @@ async def internal_search_unified(request: UnifiedSearchRequest):
 @app.post("/internal/sync")
 async def internal_sync(request: SyncRequest):
     """
-    Internal sync endpoint - dipanggil oleh orchestrator.
+    Internal sync endpoint.
     """
     logger.info(f"[SYNC] Action: {request.action}")
+    
+    model = await get_model()
+    sync_module.set_instances(model, qdrant)
     
     result = await sync_module.sync_data(
         action=request.action,

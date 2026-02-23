@@ -5,7 +5,10 @@ Common utility functions used across services
 import re
 import ast
 import json
+import httpx
 from typing import Dict, List, Set, Optional, Any
+
+from config import config
 
 # Stopwords untuk filtering
 STOPWORDS: Set[str] = {
@@ -165,14 +168,11 @@ def tokenize_and_filter(text: str) -> List[str]:
 
 def keyword_overlap(question_a: str, question_b: str) -> float:
     """Hitung overlap score antara dua teks."""
-    # Normalize: hapus tanda baca sebelum expand
-    question_a_clean = re.sub(r"[^\w\s]", " ", question_a)
-    question_b_clean = re.sub(r"[^\w\s]", " ", question_b)
+    question_a_normalized = re.sub(r"[^\w\s]", " ", question_a)
+    question_b_normalized = re.sub(r"[^\w\s]", " ", question_b)
     
-    question_a_expanded = expand_terms(question_a_clean)
-    question_b_expanded = expand_terms(question_b_clean)
-    tokens_a = set(tokenize_and_filter(question_a_expanded))
-    tokens_b = set(tokenize_and_filter(question_b_expanded))
+    tokens_a = set(tokenize_and_filter(expand_terms(question_a_normalized)))
+    tokens_b = set(tokenize_and_filter(expand_terms(question_b_normalized)))
     if not tokens_a or not tokens_b:
         return 0.0
     return len(tokens_a & tokens_b) / len(tokens_a | tokens_b)
@@ -272,3 +272,55 @@ def format_for_display(text: str) -> str:
 def calculate_final_score(dense_score: float, overlap_score: float = 0.0) -> float:
     """Calculate final score dengan weighted average."""
     return round((0.65 * dense_score) + (0.35 * overlap_score), 3)
+
+
+_embed_client: httpx.AsyncClient = None
+
+
+def _get_embed_client() -> httpx.AsyncClient:
+    """Lazy-init a shared httpx client for embedding service."""
+    global _embed_client
+    if _embed_client is None or _embed_client.is_closed:
+        _embed_client = httpx.AsyncClient(
+            base_url=config.SHARED_EMBEDDING_URL,
+            timeout=120.0
+        )
+    return _embed_client
+
+
+async def encode_texts(
+    texts: list[str],
+    model: Optional[Any] = None,
+    prefix: str = "query: ",
+    model_size: str = "small",
+) -> list[list[float]]:
+    """
+    Encode texts into embeddings.
+    
+    If USE_SHARED_EMBEDDING is True, delegates to the embedding microservice.
+    Otherwise, uses the local SentenceTransformer model passed as `model`.
+    
+    Args:
+        texts: List of raw texts (prefix NOT yet applied).
+        model: Local SentenceTransformer instance (used only when USE_SHARED_EMBEDDING=False).
+        prefix: E5 prefix, e.g. "query: " or "passage: ".
+        model_size: "small" or "large" (only relevant for shared service).
+    
+    Returns:
+        List of embedding vectors.
+    """
+    if config.USE_SHARED_EMBEDDING:
+        client = _get_embed_client()
+        resp = await client.post("/embed", json={
+            "texts": texts,
+            "prefix": prefix,
+            "model_size": model_size,
+        })
+        resp.raise_for_status()
+        return resp.json()["embeddings"]
+    else:
+        if model is None:
+            raise ValueError("encode_texts: model is required when USE_SHARED_EMBEDDING=False")
+        prefixed = [f"{prefix}{t}" for t in texts]
+        return model.encode(prefixed).tolist()
+

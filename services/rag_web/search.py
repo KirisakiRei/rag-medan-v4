@@ -1,7 +1,4 @@
-"""
-RAG Web Service - Search Module
-Logic pencarian di web_scraping_bank.
-"""
+"""Search module for web_scraping_bank."""
 import os
 import sys
 import time
@@ -15,17 +12,16 @@ from qdrant_client.http import models as qdrant_models
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from config import config
-# REMOVED: ai_check_relevance - post-filter sekarang di orchestrator
+from shared.utils import encode_texts
 
 logger = logging.getLogger("rag_web.search")
 
-# Global instances (diinisialisasi dari main.py)
 model: SentenceTransformer = None
 qdrant: AsyncQdrantClient = None
 
 
 def set_instances(embedding_model: SentenceTransformer, qdrant_client: AsyncQdrantClient):
-    """Set global instances dari main.py"""
+    """Set global instances."""
     global model, qdrant
     model = embedding_model
     qdrant = qdrant_client
@@ -37,7 +33,7 @@ async def search_web_bank(
     limit: int = 5,
     score_threshold: float = 0.5
 ) -> Dict[str, Any]:
-    """Semantic search di RAG Web Scraping, compatible dengan V2 response format."""
+    """Semantic search in web_scraping_bank."""
     start_total = time.time()
     
     logger.info(f"Search request: question='{question}', wa_number={wa_number}")
@@ -46,7 +42,7 @@ async def search_web_bank(
     
     start_embed = time.time()
     try:
-        query_embedding = model.encode(f"query: {final_question}", convert_to_numpy=True).tolist()
+        [query_embedding] = await encode_texts([final_question], model=model, prefix="query: ")
     except Exception as e:
         logger.error(f"Embedding error: {e}")
         return _build_error_response(
@@ -170,7 +166,7 @@ def _build_error_response(
     final_question: str,
     error_message: str
 ) -> Dict[str, Any]:
-    """Build error response dengan format yang konsisten."""
+    """Build consistent error response."""
     return {
         "status": "error",
         "message": error_message,
@@ -203,7 +199,7 @@ async def search_web_unified(
     top_k: int = 3,
     score_threshold: float = 0.5
 ) -> Dict[str, Any]:
-    """Search di web_scraping_bank untuk unified mode, return top K candidates."""
+    """Search web_scraping_bank for unified mode, return top-K candidates."""
     start_time = time.time()
     
     logger.info(f"[UNIFIED] Search web: {question[:50]}...")
@@ -211,7 +207,7 @@ async def search_web_unified(
     try:
         embedding_start = time.time()
         final_question = question.strip().rstrip("?").strip()
-        query_embedding = model.encode(f"query: {final_question}", convert_to_numpy=True).tolist()
+        [query_embedding] = await encode_texts([final_question], model=model, prefix="query: ")
         embedding_duration = time.time() - embedding_start
 
         qdrant_start = time.time()

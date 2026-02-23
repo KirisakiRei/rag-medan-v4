@@ -1,7 +1,3 @@
-"""
-RAG Text Service - Sync Module
-Logic sinkronisasi knowledge_bank.
-"""
 import os
 import sys
 import logging
@@ -15,37 +11,23 @@ from qdrant_client.http import models as qdrant_models
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from config import config
+from shared.utils import encode_texts
 
 logger = logging.getLogger("rag_text.sync")
 
-# Global instances (diinisialisasi dari main.py)
 model: SentenceTransformer = None
 qdrant: AsyncQdrantClient = None
 
 
 def set_instances(embedding_model: SentenceTransformer, qdrant_client: AsyncQdrantClient):
-    """Set global instances dari main.py"""
+    """Set global instances."""
     global model, qdrant
     model = embedding_model
     qdrant = qdrant_client
 
 
 async def sync_data(action: str, content: Any) -> Dict[str, Any]:
-    """
-    Sinkronisasi data knowledge_bank.
-    PAYLOAD DAN RESPONSE PERSIS SEPERTI V2!
-    
-    Args:
-        action: "bulk_sync", "add", "update", "delete"
-        content: data sesuai action
-        
-    Returns:
-        Dict response sesuai V2
-    """
     try:
-        # =====================================================
-        # BULK SYNC (PERSIS V2)
-        # =====================================================
         if action == "bulk_sync":
             if not isinstance(content, list):
                 return {
@@ -53,10 +35,9 @@ async def sync_data(action: str, content: Any) -> Dict[str, Any]:
                     "error": {"type": "ValidationError", "message": "Content harus berupa list"}
                 }
             
+            vectors = await encode_texts([item["question_rag_name"] for item in content], model=model, prefix="passage: ")
             points = []
-            for item in content:
-                # PERSIS V2: encoding dengan prefix "passage:"
-                vector = model.encode("passage: " + item["question_rag_name"]).tolist()
+            for item, vector in zip(content, vectors):
                 point_id = str(item["question_rag_id"])
                 points.append({
                     "id": point_id,
@@ -72,7 +53,6 @@ async def sync_data(action: str, content: Any) -> Dict[str, Any]:
             
             await qdrant.upsert(collection_name=config.COLLECTION_TEXT, points=points)
             
-            # Create text index (PERSIS V2)
             await qdrant.create_payload_index(
                 collection_name=config.COLLECTION_TEXT,
                 field_name="question_rag_name",
@@ -87,19 +67,15 @@ async def sync_data(action: str, content: Any) -> Dict[str, Any]:
             
             logger.info(f"[SYNC-DATA] Sinkronisasi {len(points)} data ke Knowledge Bank berhasil")
             
-            # RESPONSE PERSIS V2:
             return {
                 "status": "success",
                 "message": f"Sinkronisasi {len(points)} data berhasil",
                 "total_synced": len(points)
             }
         
-        # =====================================================
-        # ADD (PERSIS V2)
-        # =====================================================
         elif action == "add":
             point_id = str(content["question_rag_id"])
-            vector = model.encode("passage: " + content["question_rag_name"]).tolist()
+            [vector] = await encode_texts([content["question_rag_name"]], model=model, prefix="passage: ")
             await qdrant.upsert(
                 collection_name=config.COLLECTION_TEXT,
                 points=[{
@@ -116,15 +92,11 @@ async def sync_data(action: str, content: Any) -> Dict[str, Any]:
             )
             logger.info(f"[SYNC-DATA] Data berhasil ditambahkan ke Knowledge Bank: ID={point_id}")
             
-            # RESPONSE PERSIS V2:
             return {"status": "success", "message": "Data berhasil ditambahkan", "id": point_id}
         
-        # =====================================================
-        # UPDATE (PERSIS V2)
-        # =====================================================
         elif action == "update":
             point_id = str(content["question_rag_id"])
-            vector = model.encode("passage: " + content["question_rag_name"]).tolist()
+            [vector] = await encode_texts([content["question_rag_name"]], model=model, prefix="passage: ")
             await qdrant.upsert(
                 collection_name=config.COLLECTION_TEXT,
                 points=[{
@@ -141,12 +113,8 @@ async def sync_data(action: str, content: Any) -> Dict[str, Any]:
             )
             logger.info(f"[SYNC-DATA] Data berhasil Diperbarui di Knowledge Bank: ID={point_id}")
             
-            # RESPONSE PERSIS V2:
             return {"status": "success", "message": "Data berhasil diperbarui"}
         
-        # =====================================================
-        # DELETE (PERSIS V2)
-        # =====================================================
         elif action == "delete":
             point_id = str(content["question_rag_id"])
             await qdrant.delete(
@@ -156,7 +124,6 @@ async def sync_data(action: str, content: Any) -> Dict[str, Any]:
             )
             logger.info(f"[SYNC-DATA] Data dihapus : ID={point_id}")
             
-            # RESPONSE PERSIS V2:
             return {"status": "success", "message": "Data berhasil dihapus"}
         
         else:

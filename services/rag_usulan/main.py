@@ -1,9 +1,9 @@
-"""
-RAG Usulan Service - Main Application
-FastAPI app untuk RAG Usulan (usulan_bank)
-"""
+"""FastAPI app for RAG Usulan service."""
 import os
 import sys
+import gc
+import time
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 
@@ -20,17 +20,57 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 from config import config
 from shared.logging_config import setup_logging
 
-# Import modules
 from services.rag_usulan import search as search_module
 from services.rag_usulan import sync as sync_module
 from services.rag_usulan.models import SearchRequest, SyncRequest
 
-# Setup logging
 logger = setup_logging("rag_usulan")
 
-# Global instances
-model: SentenceTransformer = None
+_model: SentenceTransformer = None
+_model_lock = asyncio.Lock()
+_last_model_used: float = 0.0
 qdrant: AsyncQdrantClient = None
+
+
+async def get_model() -> SentenceTransformer:
+    """Lazy load embedding model with thundering herd protection."""
+    global _model, _last_model_used
+    
+    if _model is not None:
+        _last_model_used = time.time()
+        return _model
+    
+    async with _model_lock:
+        if _model is not None:
+            _last_model_used = time.time()
+            return _model
+        
+        logger.info("Loading embedding model (lazy)...")
+        _model = SentenceTransformer(config.EMBEDDING_MODEL_PATH)
+        _last_model_used = time.time()
+        logger.info(f"Model loaded: {config.EMBEDDING_MODEL_PATH}")
+        
+        search_module.set_instances(_model, qdrant)
+        sync_module.set_instances(_model, qdrant)
+        
+        return _model
+
+
+async def _idle_unload_loop():
+    """Background task: unload model after IDLE_TIMEOUT seconds of inactivity."""
+    global _model, _last_model_used
+    while True:
+        await asyncio.sleep(300)
+        if _model is not None and _last_model_used > 0:
+            idle_seconds = time.time() - _last_model_used
+            if idle_seconds > config.MODEL_IDLE_TIMEOUT:
+                async with _model_lock:
+                    if _model is not None and (time.time() - _last_model_used) > config.MODEL_IDLE_TIMEOUT:
+                        logger.info(f"Model idle for {idle_seconds:.0f}s > {config.MODEL_IDLE_TIMEOUT}s, unloading...")
+                        del _model
+                        _model = None
+                        gc.collect()
+                        logger.info("Model unloaded, RAM freed")
 
 
 async def init_qdrant():
@@ -42,14 +82,19 @@ async def init_qdrant():
             host=config.QDRANT_HOST,
             port=config.QDRANT_PORT,
             api_key=config.QDRANT_API_KEY,
+            grpc_port=None,
+            prefer_grpc=False,
+            timeout=60
         )
     else:
         qdrant = AsyncQdrantClient(
             host=config.QDRANT_HOST,
             port=config.QDRANT_PORT,
+            grpc_port=None,
+            prefer_grpc=False,
+            timeout=60
         )
     
-    # Ensure collection exists
     try:
         collections = await qdrant.get_collections()
         collection_names = [c.name for c in collections.collections]
@@ -69,30 +114,17 @@ async def init_qdrant():
     logger.info(f"Qdrant connected: {config.QDRANT_HOST}:{config.QDRANT_PORT}")
 
 
-def init_model():
-    """Initialize embedding model."""
-    global model
-    logger.info("Loading embedding model...")
-    model = SentenceTransformer(config.EMBEDDING_MODEL_PATH)
-    logger.info(f"Model loaded: {config.EMBEDDING_MODEL_PATH}")
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Application lifespan."""
-    # Startup
-    init_model()
+    """Application lifespan - model loaded lazily on first request."""
     await init_qdrant()
     
-    # Set instances ke modules
-    search_module.set_instances(model, qdrant)
-    sync_module.set_instances(model, qdrant)
+    asyncio.create_task(_idle_unload_loop())
     
-    logger.info(f"RAG Usulan Service Started on port {config.USULAN_SERVICE_PORT}")
+    logger.info(f"RAG Usulan Service Started on port {config.USULAN_SERVICE_PORT} (model: lazy load)")
     
     yield
     
-    # Shutdown
     logger.info("RAG Usulan Service Shutting down...")
 
 
@@ -110,24 +142,18 @@ app = FastAPI(
 async def health_check():
     """Health check endpoint."""
     try:
-        _ = model.encode("test").tolist()
-        model_ok = True
-    except:
-        model_ok = False
-    
-    try:
         await qdrant.get_collections()
         qdrant_ok = True
     except:
         qdrant_ok = False
     
-    status = "healthy" if model_ok and qdrant_ok else "unhealthy"
+    status = "healthy" if qdrant_ok else "unhealthy"
     
     return {
         "status": status,
         "service": "rag_usulan",
+        "model_loaded": _model is not None,
         "components": {
-            "embedding_model": model_ok,
             "qdrant": qdrant_ok
         }
     }
@@ -136,6 +162,7 @@ async def health_check():
 @app.post("/internal/search")
 async def internal_search(request: SearchRequest):
     """Internal search endpoint - dipanggil oleh orchestrator."""
+    await get_model()
     logger.info(f"[SEARCH] Question: {request.question[:50]}...")
     
     result = await search_module.search_usulan_bank(
@@ -149,6 +176,7 @@ async def internal_search(request: SearchRequest):
 @app.post("/internal/sync")
 async def internal_sync(request: SyncRequest):
     """Internal sync endpoint - dipanggil oleh orchestrator."""
+    await get_model()
     logger.info(f"[SYNC] Action: {request.action}")
     
     result = await sync_module.sync_usulan(

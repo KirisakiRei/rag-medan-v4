@@ -16,6 +16,11 @@ def _env(key, default=None, cast=str):
             return int(val)
         except Exception:
             return int(default) if default is not None else None
+    if cast is float:
+        try:
+            return float(val)
+        except Exception:
+            return float(default) if default is not None else None
     if cast is bool:
         return str(val).lower() in ("true", "1", "yes")
     if cast is list:
@@ -122,6 +127,27 @@ class Config:
     
     # CORS
     CORS_ORIGINS: List[str] = _env("CORS_ORIGINS", "*", list) or ["*"]
+    
+    # ============== OPTIMIZATION CONFIGS ==============
+    
+    # Gemini concurrency limiter (max parallel Gemini API calls)
+    GEMINI_MAX_CONCURRENT = _env("GEMINI_MAX_CONCURRENT", 20, int)
+    
+    # Prompt cache TTL in seconds (how long DB prompt overrides are cached)
+    PROMPT_CACHE_TTL = _env("PROMPT_CACHE_TTL", 300, int)
+    
+    # Early exit threshold for adaptive fan-out (orchestrator)
+    EARLY_EXIT_THRESHOLD = _env("EARLY_EXIT_THRESHOLD", 0.92, float)
+    
+    # Model idle timeout in seconds (lazy load / idle unload)
+    MODEL_IDLE_TIMEOUT = _env("MODEL_IDLE_TIMEOUT", 600, int)
+    
+    # Shared Embedding Service
+    USE_SHARED_EMBEDDING = _env("USE_SHARED_EMBEDDING", "false", bool)
+    SHARED_EMBEDDING_URL = _env("SHARED_EMBEDDING_URL", "http://localhost:5014")
+    EMBEDDING_SERVICE_PORT = _env("EMBEDDING_SERVICE_PORT", 5014, int)
+    EMBEDDING_THREAD_POOL_SIZE = _env("EMBEDDING_THREAD_POOL_SIZE", 2, int)
+    LARGE_MODEL_IDLE_TIMEOUT = _env("LARGE_MODEL_IDLE_TIMEOUT", 1800, int)
 
 
 # Singleton instance

@@ -1,8 +1,4 @@
-"""
-RAG Usulan Service - Search Module
-Logic pencarian di usulan_bank
-PAYLOAD DAN SCORING HARUS PERSIS SEPERTI V2!
-"""
+"""Search module for usulan_bank."""
 import os
 import sys
 import time
@@ -17,17 +13,17 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 from config import config
 from shared.filtering import ai_pre_filter_usulan, ai_relevance_usulan
+from shared.utils import encode_texts
 
 logger = logging.getLogger("rag_usulan.search")
 
-# Global instances (diinisialisasi dari main.py)
 model: SentenceTransformer = None
 qdrant: AsyncQdrantClient = None
 rag_summary_logger = None
 
 
 def set_instances(embedding_model: SentenceTransformer, qdrant_client: AsyncQdrantClient, summary_logger=None):
-    """Set global instances dari main.py"""
+    """Set global instances."""
     global model, qdrant, rag_summary_logger
     model = embedding_model
     qdrant = qdrant_client
@@ -39,16 +35,9 @@ async def search_usulan_bank(
     wa_number: str = "unknown",
     limit: int = 5
 ) -> Dict[str, Any]:
-    """
-    Search di usulan_bank.
-    PAYLOAD DAN SCORING PERSIS SEPERTI V2!
-    
-    Returns:
-        Dict dengan format v2-compatible response
-    """
+    """Search usulan_bank, return scored results."""
     start_time = time.time()
     user_request = (question or "").strip()
-    whatsapp_number = wa_number
 
     if not user_request:
         return {
@@ -58,19 +47,15 @@ async def search_usulan_bank(
 
     logger.info(f"[USER-REQUEST] Request User: {user_request}")
 
-    # =====================================================
-    # 1. AI Pre-filter / Reformulation (PERSIS V2)
-    # =====================================================
+    # 1. AI Pre-filter / Reformulation
     reformulation_start = time.time()
-    reformulation_result = ai_pre_filter_usulan(user_request)
+    reformulation_result = await ai_pre_filter_usulan(user_request)
     reformulation_duration = time.time() - reformulation_start
     clean_request = reformulation_result.get("clean_request", user_request)
 
-    # =====================================================
-    # 2. Embedding & Query Qdrant (PERSIS V2)
-    # =====================================================
+    # 2. Embedding & Query Qdrant
     embedding_start = time.time()
-    query_vector = model.encode("query: " + clean_request).tolist()
+    [query_vector] = await encode_texts([clean_request], model=model, prefix="query: ")
     embedding_duration = time.time() - embedding_start
 
     qdrant_start = time.time()
@@ -94,22 +79,16 @@ async def search_usulan_bank(
     except Exception as e:
         logger.error(f"[USULAN-SEARCH] Gagal mencetak hasil pencarian: {e}")
 
-    # =====================================================
-    # 3. Scoring Logic (PERSIS V2!)
-    # =====================================================
+    # 3. Scoring Logic
     accepted_results, rejected_results = [], []
     for hit in qdrant_results:
         dense_score = float(hit.score)
-        # PERSIS V2: final_score = dense_score (tidak ada overlap untuk usulan)
         final_score = round(dense_score, 3)
         acceptance_note, is_accepted = "-", False
         
-        # SCORING LOGIC PERSIS V2:
-        # Accept jika dense >= 0.85
         if dense_score >= 0.85:
             is_accepted, acceptance_note = True, "Data yang Relevan Ditemukan"
 
-        # PAYLOAD RESULT PERSIS V2:
         result_item = {
             "request_id": hit.payload.get("request_id"),
             "organization_id": hit.payload.get("organization_id"),
@@ -125,12 +104,10 @@ async def search_usulan_bank(
     accepted_results = sorted(accepted_results, key=lambda x: x["final_score"], reverse=True)
     rejected_results = sorted(rejected_results, key=lambda x: x["final_score"], reverse=True)
 
-    # =====================================================
-    # 4. AI Topic Relevance Check (PERSIS V2)
-    # =====================================================
+    # 4. AI Topic Relevance Check
     if qdrant_results:
         top_rag_name = qdrant_results[0].payload.get("request_rag_name", "-")
-        topic_check_result = ai_relevance_usulan(user_request, top_rag_name)
+        topic_check_result = await ai_relevance_usulan(user_request, top_rag_name)
     else:
         topic_check_result = {"relevant": True, "reason": "Tidak ada hasil RAG"}
 
@@ -146,7 +123,6 @@ async def search_usulan_bank(
                 f"Relevan: {topic_check_result.get('relevant')} | Reason: {topic_check_result.get('reason')}\n{'='*60}\n"
             )
         
-        # RESPONSE PERSIS V2 untuk topik tidak relevan:
         return {
             "status": "low_confidence",
             "message": "Topik tidak relevan dengan pertanyaan pengguna",
@@ -163,16 +139,14 @@ async def search_usulan_bank(
     logger.info(f"[USULAN-POST] Output akan dikirim ke WABOT: '{final_usulan_output}'")
     total_duration = time.time() - start_time
 
-    # =====================================================
-    # 5. RESPONSE PAYLOAD PERSIS V2!
-    # =====================================================
+    # 5. Build Response
     response_payload = {
         "status": "success" if accepted_results else "low_confidence",
         "message": "Hasil ditemukan" if accepted_results else "Tidak ada hasil cukup relevan",
         "data": {
             "similar_questions": accepted_results if accepted_results else rejected_results,
             "metadata": {
-                "wa_number": whatsapp_number,
+                "wa_number": wa_number,
                 "user_question": user_request,
                 "final_score_top": (accepted_results[0]["final_score"] if accepted_results else "-")
             }

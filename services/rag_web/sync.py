@@ -1,7 +1,4 @@
-"""
-RAG Web Service - Sync Module
-Logic sinkronisasi web content ke web_scraping_bank
-"""
+"""Sync module for web_scraping_bank."""
 import os
 import sys
 import time
@@ -21,24 +18,19 @@ from config import config
 from services.rag_web.scraper import scraper
 from services.rag_web.cleaner import cleaner
 from services.rag_web.chunker import chunker, Chunk
+from shared.utils import encode_texts
 
 logger = logging.getLogger("rag_web.sync")
 
-# Global instances (diinisialisasi dari main.py)
 model: SentenceTransformer = None
 qdrant: AsyncQdrantClient = None
 
 
 def set_instances(embedding_model: SentenceTransformer, qdrant_client: AsyncQdrantClient):
-    """Set global instances dari main.py"""
+    """Set global instances."""
     global model, qdrant
     model = embedding_model
     qdrant = qdrant_client
-
-
-def embed_text(text: str) -> List[float]:
-    """Generate embedding untuk text dengan prefix 'passage:' (E5 model requirement)."""
-    return model.encode(f"passage: {text}", convert_to_numpy=True).tolist()
 
 
 async def store_chunks(
@@ -49,7 +41,7 @@ async def store_chunks(
     embeddings: List[List[float]],
     metadata: Dict[str, Any] = None
 ) -> List[str]:
-    """Store chunks ke Qdrant."""
+    """Store chunks to Qdrant."""
     if len(chunks) != len(embeddings):
         raise ValueError("Chunks and embeddings count mismatch")
     
@@ -175,12 +167,7 @@ async def process_url(
     url: str,
     metadata: Optional[Dict[str, Any]] = None
 ) -> Dict[str, Any]:
-    """
-    Process URL: scrape -> clean -> chunk -> embed -> store.
-    
-    Returns:
-        Dict dengan status dan info
-    """
+    """Process URL: scrape → clean → chunk → embed → store."""
     try:
         logger.info(f"[SYNC] Processing URL: {url}")
         
@@ -202,7 +189,7 @@ async def process_url(
         
         # 4. Embed
         chunk_texts = [chunk.content for chunk in chunks]
-        embeddings = [embed_text(text) for text in chunk_texts]
+        embeddings = await encode_texts(chunk_texts, model=model, prefix="passage: ")
         
         # 5. Delete existing dan store baru
         await hard_delete_by_link_id(link_id)
@@ -239,12 +226,7 @@ async def sync_edited_content(
     link_id: str,
     edited_content: str
 ) -> Dict[str, Any]:
-    """
-    Sync edited content (user sudah edit konten).
-    
-    Returns:
-        Dict dengan status dan info
-    """
+    """Sync edited content (user-edited)."""
     try:
         logger.info(f"[SYNC] Syncing edited content for link_id={link_id}")
         
@@ -272,7 +254,7 @@ async def sync_edited_content(
         
         # Embed
         chunk_texts = [chunk.content for chunk in chunks]
-        embeddings = [embed_text(text) for text in chunk_texts]
+        embeddings = await encode_texts(chunk_texts, model=model, prefix="passage: ")
         
         # Delete old dan store new
         await hard_delete_by_link_id(link_id)

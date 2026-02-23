@@ -1,7 +1,3 @@
-"""
-RAG Document Service - Search Module
-Logic pencarian di document_bank.
-"""
 import os
 import sys
 import time
@@ -16,26 +12,19 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 from config import config
 from shared.summarizer_utils import summarize_text
-from shared.utils import format_for_display
-# REMOVED: ai_check_relevance - post-filter sekarang di orchestrator
+from shared.utils import format_for_display, encode_texts
 
 logger = logging.getLogger("rag_document.search")
 
-# Global instances (diinisialisasi dari main.py)
 model: SentenceTransformer = None
 qdrant: AsyncQdrantClient = None
 
 
 def set_instances(embedding_model: SentenceTransformer, qdrant_client: AsyncQdrantClient):
-    """Set global instances dari main.py"""
+    """Set global instances."""
     global model, qdrant
     model = embedding_model
     qdrant = qdrant_client
-
-
-def embed_query(model_doc: SentenceTransformer, text: str) -> List[float]:
-    """Generate embedding untuk query dengan prefix 'query:' (E5 model requirement)."""
-    return model_doc.encode(f"query: {text}", convert_to_numpy=True).tolist()
 
 
 async def search_document_bank(
@@ -43,14 +32,12 @@ async def search_document_bank(
     limit: int = 5,
     request_source: str = "unknown"
 ) -> Dict[str, Any]:
-    """Search di document_bank, compatible dengan V2 response format."""
+    """Search document_bank (direct mode)."""
     logger.info(f"[API] doc-search query='{query}' limit={limit} | source={request_source}")
 
     try:
-        # Embed query langsung
-        query_vector = embed_query(model, query)
+        query_vector, = await encode_texts([query], model=model, prefix="query: ", model_size="large")
 
-        # Query ke Qdrant
         qdrant_hits = await qdrant.query_points(
             collection_name=config.COLLECTION_DOCUMENT,
             query=query_vector,
@@ -61,20 +48,20 @@ async def search_document_bank(
         search_results = []
 
         for hit in result_points:
-            result_item = hit[0] if isinstance(hit, tuple) else hit
-            result_payload = getattr(result_item, "payload", {}) or result_item.get("payload", {})
-            result_score = getattr(result_item, "score", 0.0)
+            point = hit[0] if isinstance(hit, tuple) else hit
+            payload = getattr(point, "payload", {}) or point.get("payload", {})
+            score = getattr(point, "score", 0.0)
 
             search_results.append({
-                "doc_id": result_payload.get("mysql_id"),
-                "opd": result_payload.get("opd"),
-                "filename": result_payload.get("filename"),
-                "page_number": result_payload.get("page_number"),
-                "chunk_index": result_payload.get("chunk_index"),
-                "section": result_payload.get("section"),
-                "summary": result_payload.get("summary"),
-                "text": result_payload.get("text"),
-                "score": float(result_score)
+                "doc_id": payload.get("mysql_id"),
+                "opd": payload.get("opd"),
+                "filename": payload.get("filename"),
+                "page_number": payload.get("page_number"),
+                "chunk_index": payload.get("chunk_index"),
+                "section": payload.get("section"),
+                "summary": payload.get("summary"),
+                "text": payload.get("text"),
+                "score": float(score)
             })
 
         if not search_results:
@@ -83,8 +70,8 @@ async def search_document_bank(
 
         logger.info(f"[API] doc-search results={len(search_results)} hits | top_score={search_results[0]['score']:.3f}")
 
-        use_post_summary = config.RAG_USE_POST_SUMMARY
-        post_summary_top_k = config.RAG_POST_SUMMARY_TOP_K
+        use_post_summary = config.USE_POST_SUMMARY
+        post_summary_top_k = config.POST_SUMMARY_TOP_K
 
         if use_post_summary:
             logger.info(f"[POST-SUM] Aktif → meringkas top {post_summary_top_k} hasil ...")
@@ -132,14 +119,14 @@ async def search_document_unified(
     wa_number: str = "unknown",
     top_k: int = 3
 ) -> Dict[str, Any]:
-    """Search di document_bank untuk unified mode, return top K candidates."""
+    """Search document_bank for unified mode, return top-K candidates."""
     start_time = time.time()
     
     logger.info(f"[DOC-SEARCH] Question: {question[:50]}...")
 
     try:
         embedding_start = time.time()
-        query_vector = embed_query(model, question)
+        query_vector, = await encode_texts([question], model=model, prefix="query: ", model_size="large")
         embedding_duration = time.time() - embedding_start
 
         qdrant_start = time.time()

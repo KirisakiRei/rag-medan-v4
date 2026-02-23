@@ -1,7 +1,3 @@
-"""
-RAG Text Service - Pydantic Models
-Request/Response models untuk rag_text service
-"""
 from typing import Optional, Any, List, Dict
 from pydantic import BaseModel, Field
 
@@ -9,24 +5,24 @@ from pydantic import BaseModel, Field
 # ============== REQUEST MODELS ==============
 
 class SearchRequest(BaseModel):
-    """Request dari orchestrator untuk search."""
+    """Request for search endpoint."""
     question: str
     wa_number: str = "unknown"
-    original_question: Optional[str] = None  # Pertanyaan asli user (jika dari orchestrator)
-    skip_prefilter: bool = False  # Skip pre-filter jika sudah dilakukan di orchestrator
+    original_question: Optional[str] = None
+    skip_prefilter: bool = False
 
 
 class UnifiedSearchRequest(BaseModel):
-    """Request dari orchestrator untuk unified search (parallel mode)."""
-    question: str  # Clean question dari orchestrator
-    original_question: str  # Pertanyaan asli user
+    """Request for unified search (parallel mode)."""
+    question: str
+    original_question: str
     wa_number: str = "unknown"
-    top_k: int = 3  # Number of candidates to return
+    top_k: int = 3
 
 
 class SyncRequest(BaseModel):
-    """Request untuk sync knowledge_bank."""
-    action: str  # bulk_sync, add, update, delete
+    """Request for sync operations."""
+    action: str
     content: Optional[Any] = None
 
 
@@ -54,7 +50,7 @@ class SearchResultItem(BaseModel):
 
 
 class SearchMetadata(BaseModel):
-    """Metadata dari search."""
+    """Search metadata."""
     wa_number: str
     original_question: str
     final_question: str

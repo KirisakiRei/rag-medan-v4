@@ -1,7 +1,4 @@
-"""
-RAG Usulan Service - Sync Module
-Logic sinkronisasi usulan_bank.
-"""
+"""Sync module for usulan_bank."""
 import os
 import sys
 import logging
@@ -15,39 +12,26 @@ from qdrant_client.http import models as qdrant_models
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from config import config
+from shared.utils import encode_texts
 
 logger = logging.getLogger("rag_usulan.sync")
 
-# Global instances (diinisialisasi dari main.py)
 model: SentenceTransformer = None
 qdrant: AsyncQdrantClient = None
 
 
 def set_instances(embedding_model: SentenceTransformer, qdrant_client: AsyncQdrantClient):
-    """Set global instances dari main.py"""
+    """Set global instances."""
     global model, qdrant
     model = embedding_model
     qdrant = qdrant_client
 
 
 async def sync_usulan(action: str, content: Any) -> Dict[str, Any]:
-    """
-    Sinkronisasi data usulan_bank.
-    PAYLOAD DAN RESPONSE PERSIS SEPERTI V2!
-    
-    Args:
-        action: "bulk_sync", "add", "update", "delete"
-        content: data sesuai action
-        
-    Returns:
-        Dict response sesuai V2
-    """
+    """Sync data to usulan_bank."""
     collection = config.COLLECTION_USULAN
     
     try:
-        # =====================================================
-        # BULK SYNC (PERSIS V2)
-        # =====================================================
         if action == "bulk_sync":
             if not isinstance(content, list):
                 return {
@@ -55,10 +39,9 @@ async def sync_usulan(action: str, content: Any) -> Dict[str, Any]:
                     "error": {"type": "ValidationError", "message": "Content harus berupa list"}
                 }
             
+            vectors = await encode_texts([item["request_rag_name"] for item in content], model=model, prefix="passage: ")
             points = []
-            for item in content:
-                # PERSIS V2: encoding dengan prefix "passage:"
-                vector = model.encode("passage: " + item["request_rag_name"]).tolist()
+            for item, vector in zip(content, vectors):
                 point_id = str(item["request_rag_id"])
                 points.append({
                     "id": point_id,
@@ -73,7 +56,6 @@ async def sync_usulan(action: str, content: Any) -> Dict[str, Any]:
             
             await qdrant.upsert(collection_name=collection, points=points)
             
-            # Create text index (PERSIS V2)
             await qdrant.create_payload_index(
                 collection_name=collection,
                 field_name="request_rag_name",
@@ -88,18 +70,14 @@ async def sync_usulan(action: str, content: Any) -> Dict[str, Any]:
             
             logger.info(f"[SYNC-USULAN] Sinkronisasi {len(points)} data ke {collection}")
             
-            # RESPONSE PERSIS V2:
             return {
                 "status": "success",
                 "message": f"{len(points)} data berhasil disinkronkan ke {collection}"
             }
         
-        # =====================================================
-        # ADD / UPDATE (PERSIS V2)
-        # =====================================================
         elif action in ["add", "update"]:
             point_id = str(content["request_rag_id"])
-            vector = model.encode("passage: " + content["request_rag_name"]).tolist()
+            [vector] = await encode_texts([content["request_rag_name"]], model=model, prefix="passage: ")
             await qdrant.upsert(
                 collection_name=collection,
                 points=[{
@@ -115,12 +93,8 @@ async def sync_usulan(action: str, content: Any) -> Dict[str, Any]:
             )
             logger.info(f"[SYNC-USULAN] Data {action} berhasil (ID={point_id})")
             
-            # RESPONSE PERSIS V2:
             return {"status": "success", "message": f"Data {action} berhasil"}
         
-        # =====================================================
-        # DELETE (PERSIS V2)
-        # =====================================================
         elif action == "delete":
             point_id = str(content["request_rag_id"])
             await qdrant.delete(
@@ -130,7 +104,6 @@ async def sync_usulan(action: str, content: Any) -> Dict[str, Any]:
             )
             logger.info(f"[SYNC-USULAN] Data dihapus (ID={point_id})")
             
-            # RESPONSE PERSIS V2:
             return {"status": "success", "message": "Data berhasil dihapus"}
         
         else:
