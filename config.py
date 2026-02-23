@@ -143,7 +143,7 @@ class Config:
     MODEL_IDLE_TIMEOUT = _env("MODEL_IDLE_TIMEOUT", 600, int)
     
     # Shared Embedding Service
-    USE_SHARED_EMBEDDING = _env("USE_SHARED_EMBEDDING", "false", bool)
+    USE_SHARED_EMBEDDING = _env("USE_SHARED_EMBEDDING", "true", bool)
     SHARED_EMBEDDING_URL = _env("SHARED_EMBEDDING_URL", "http://localhost:5014")
     EMBEDDING_SERVICE_PORT = _env("EMBEDDING_SERVICE_PORT", 5014, int)
     EMBEDDING_THREAD_POOL_SIZE = _env("EMBEDDING_THREAD_POOL_SIZE", 2, int)
