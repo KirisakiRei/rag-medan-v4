@@ -143,6 +143,12 @@ async def lifespan(app: FastAPI):
     
     logger.info("RAG Web Service Shutting down...")
 
+    try:
+        from services.rag_web.js_renderer import js_renderer
+        await js_renderer.close()
+    except Exception as e:
+        logger.warning(f"Error saat close js_renderer: {e}")
+
 
 app = FastAPI(
     title="RAG Web Service",
@@ -209,24 +215,50 @@ async def internal_search_unified(request: UnifiedSearchRequest):
 async def internal_trigger(request: TriggerRequest, background_tasks: BackgroundTasks):
     """
     Trigger web scraping in background.
+    Semua opsi (CSS selector, JS renderer, FAQ mode, dll.) diteruskan ke sync_module.
     """
     await get_model()
-    logger.info(f"[TRIGGER] link_id={request.link_id}, url={request.url}")
-    
+    logger.info(
+        f"[TRIGGER] link_id={request.link_id}, url={request.url}, "
+        f"content_type={request.content_type}, css_selector={request.css_selector}, "
+        f"use_js_renderer={request.use_js_renderer}, force_rescrape={request.force_rescrape}"
+    )
+
+    # Rate limit per-domain
+    try:
+        from services.rag_web.rate_limiter import rate_limiter
+        await rate_limiter.wait_for_domain(request.url)
+    except Exception as e:
+        logger.warning(f"[TRIGGER] Rate limiter error (ignored): {e}")
+
     job_id = str(uuid.uuid4())
-    
+
     background_tasks.add_task(
         sync_module.process_url,
         link_id=request.link_id,
         url=request.url,
-        metadata=request.metadata
+        css_selector=request.css_selector,
+        use_js_renderer=request.use_js_renderer,
+        wait_selector=request.wait_selector,
+        content_type=request.content_type,
+        faq_question_selector=request.faq_question_selector,
+        faq_answer_selector=request.faq_answer_selector,
+        force_rescrape=request.force_rescrape,
+        callback_url=request.callback_url,
+        metadata=request.metadata,
     )
-    
+
     return {
         "status": "processing",
         "message": "Scraping job started",
         "link_id": request.link_id,
-        "job_id": job_id
+        "job_id": job_id,
+        "options": {
+            "content_type": request.content_type,
+            "css_selector": request.css_selector,
+            "use_js_renderer": request.use_js_renderer,
+            "force_rescrape": request.force_rescrape,
+        }
     }
 
 

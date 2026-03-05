@@ -33,11 +33,10 @@ class Config:
     
     # API Configuration
     API_HOST = _env("API_HOST", "0.0.0.0")
-    API_PORT = _env("API_PORT", 5001, int)
     DEBUG = _env("DEBUG", "false", bool)
     
     # Service Ports (internal communication)
-    ORCHESTRATOR_PORT = _env("ORCHESTRATOR_PORT", 5001, int)
+    ORCHESTRATOR_PORT = _env("ORCHESTRATOR_PORT", 5100, int)
     TEXT_SERVICE_PORT = _env("TEXT_SERVICE_PORT", 5010, int)
     DOCUMENT_SERVICE_PORT = _env("DOCUMENT_SERVICE_PORT", 5011, int)
     WEB_SERVICE_PORT = _env("WEB_SERVICE_PORT", 5012, int)
@@ -89,7 +88,8 @@ class Config:
     # OCR Configuration
     OCR_ENGINE = _env("OCR_ENGINE", "paddle")
     OCR_LANG = _env("OCR_LANG", "id")
-    
+    OCR_TIMEOUT = _env("OCR_TIMEOUT", 1800, int)  # default 30 menit
+
     # RAG Configuration
     USE_POST_SUMMARY = _env("USE_POST_SUMMARY", "false", bool)
     POST_SUMMARY_TOP_K = _env("POST_SUMMARY_TOP_K", 2, int)
@@ -115,10 +115,19 @@ class Config:
     SCRAPING_TIMEOUT = _env("SCRAPING_TIMEOUT", 30, int)
     SCRAPING_MAX_RETRIES = _env("SCRAPING_MAX_RETRIES", 3, int)
     SCRAPING_USER_AGENT = _env("SCRAPING_USER_AGENT", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+
+    # Auto-detect JS threshold: jika clean content < nilai ini (chars), coba Playwright
+    AUTO_DETECT_MIN_CONTENT = _env("AUTO_DETECT_MIN_CONTENT", 300, int)
+    # Playwright navigation timeout (milliseconds)
+    PLAYWRIGHT_TIMEOUT = _env("PLAYWRIGHT_TIMEOUT", 30000, int)
+    # Delay (detik) antar request ke domain yang sama (rate limiting)
+    RATE_LIMIT_DELAY = _env("RATE_LIMIT_DELAY", 2.0, float)
+    # Max retry attempts untuk webhook callback
+    WEBHOOK_RETRY_ATTEMPTS = _env("WEBHOOK_RETRY_ATTEMPTS", 3, int)
     
-    # Webhook Configuration
-    WEB_MANAJEMEN_BASE_URL = _env("WEB_MANAJEMEN_BASE_URL", "")
-    WEB_MANAJEMEN_CALLBACK_URL = _env("WEB_MANAJEMEN_CALLBACK_URL", "")
+    # Webhook Configuration (shared: document dan web scraping service)
+    DOCUMENT_CALLBACK_URL = _env("DOCUMENT_CALLBACK_URL", "")
+    WEB_CALLBACK_URL = _env("WEB_CALLBACK_URL", "")
     WEB_MANAJEMEN_API_KEY = _env("WEB_MANAJEMEN_API_KEY", "")
     
     # Logging
@@ -157,7 +166,7 @@ config = Config()
 CONFIG = {
     "api": {
         "host": config.API_HOST,
-        "port": config.API_PORT
+        "port": config.ORCHESTRATOR_PORT
     },
     "embeddings": {
         "model_path": config.EMBEDDING_MODEL_PATH,
@@ -183,7 +192,8 @@ CONFIG = {
     },
     "ocr": {
         "engine": config.OCR_ENGINE,
-        "lang": config.OCR_LANG
+        "lang": config.OCR_LANG,
+        "timeout": config.OCR_TIMEOUT
     },
     "rag": {
         "use_post_summary": config.USE_POST_SUMMARY,

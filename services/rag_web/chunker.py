@@ -32,16 +32,7 @@ class Chunker:
         self.chunk_overlap = chunk_overlap
     
     def chunk(self, text: str, url: str = "") -> List[Chunk]:
-        """
-        Chunk text menjadi bagian-bagian kecil.
-        
-        Args:
-            text: Text yang akan di-chunk
-            url: URL untuk logging
-            
-        Returns:
-            List of Chunk objects
-        """
+        """Chunk text menjadi bagian kecil."""
         if not text or not text.strip():
             return []
         
@@ -141,6 +132,91 @@ class Chunker:
             end_char=end_char,
             token_count=self._estimate_tokens(content)
         )
+
+    def chunk_faq(self, pairs: list, url: str = "") -> List[Chunk]:
+        """Chunk FAQ pairs. Format: 'T: {pertanyaan}\nJ: {jawaban}'. Jawaban panjang dipecah per sub-chunk."""
+        if not pairs:
+            return []
+
+        chunks: List[Chunk] = []
+        char_position = 0
+
+        for q_text, a_text in pairs:
+            q_text = q_text.strip()
+            a_text = a_text.strip()
+
+            full_content = f"T: {q_text}\nJ: {a_text}"
+            token_count = self._estimate_tokens(full_content)
+
+            if token_count <= self.chunk_size:
+                # Pair muat dalam satu chunk
+                chunk = Chunk(
+                    content=full_content,
+                    index=len(chunks),
+                    start_char=char_position,
+                    end_char=char_position + len(full_content),
+                    token_count=token_count,
+                    metadata={
+                        "content_type": "faq",
+                        "faq_question": q_text,
+                    }
+                )
+                chunks.append(chunk)
+                char_position += len(full_content) + 2
+            else:
+                # Jawaban terlalu panjang — pecah jawaban, prefix pertanyaan di tiap sub-chunk
+                a_sentences = self.SENTENCE_PATTERN.split(a_text)
+                a_sentences = [s.strip() for s in a_sentences if s.strip()]
+
+                current_a = ""
+                sub_idx = 0
+
+                for sentence in a_sentences:
+                    combined = current_a + " " + sentence if current_a else sentence
+                    prefix = f"T: {q_text}\nJ: "
+                    combined_full = prefix + combined
+                    if self._estimate_tokens(combined_full) <= self.chunk_size:
+                        current_a = combined
+                    else:
+                        if current_a:
+                            content = f"T: {q_text}\nJ: {current_a}"
+                            chunk = Chunk(
+                                content=content,
+                                index=len(chunks),
+                                start_char=char_position,
+                                end_char=char_position + len(content),
+                                token_count=self._estimate_tokens(content),
+                                metadata={
+                                    "content_type": "faq",
+                                    "faq_question": q_text,
+                                    "faq_sub_index": sub_idx,
+                                }
+                            )
+                            chunks.append(chunk)
+                            char_position += len(content) + 2
+                            sub_idx += 1
+                        current_a = sentence
+
+                # Flush sisa
+                if current_a:
+                    content = f"T: {q_text}\nJ: {current_a}"
+                    chunk = Chunk(
+                        content=content,
+                        index=len(chunks),
+                        start_char=char_position,
+                        end_char=char_position + len(content),
+                        token_count=self._estimate_tokens(content),
+                        metadata={
+                            "content_type": "faq",
+                            "faq_question": q_text,
+                            "faq_sub_index": sub_idx,
+                        }
+                    )
+                    chunks.append(chunk)
+                    char_position += len(content) + 2
+
+        logger.info(f"[CHUNKER] FAQ mode: {len(pairs)} pairs → {len(chunks)} chunks")
+        return chunks
 
 
 # Singleton instance

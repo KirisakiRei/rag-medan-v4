@@ -21,7 +21,8 @@ class UnifiedSearchRequest(BaseModel):
 class SyncRequest(BaseModel):
     """Request for document sync."""
     doc_id: str
-    opd_name: Optional[str] = None
+    organization_id: Optional[str] = None  # UUID dari sistem wa manajemen
+    filename: Optional[str] = None          # Nama file user-friendly (opsional)
     file_url: str
 
 

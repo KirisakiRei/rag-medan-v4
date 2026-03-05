@@ -197,13 +197,31 @@ def extract_text_from_file(file_path: str, lang: str = "id", return_pages: bool 
         extracted_pages[1] = _clean_page_text(extracted_text)
 
     elif file_extension == ".docx":
-        docx_document = Document(file_path)
-        extracted_text = "\n".join([p.text.strip() for p in docx_document.paragraphs if p.text.strip()])
+        try:
+            docx_document = Document(file_path)
+        except Exception as e:
+            logger.warning(f"[DOCX] Gagal membuka file DOCX {file_path}: {e}")
+            extracted_pages[1] = ""
+            if return_pages:
+                return extracted_pages
+            return ""
+
+        text_parts = []
+        for para in docx_document.paragraphs:
+            if not para.text.strip():
+                continue
+            # Heading-aware: tambah double newline sebelum heading (batas chunk alami)
+            if para.style.name.startswith("Heading"):
+                text_parts.append("\n\n" + para.text.strip())
+            else:
+                text_parts.append(para.text.strip())
+        extracted_text = "\n".join(text_parts)
         extracted_pages[1] = _clean_page_text(extracted_text)
 
     elif file_extension == ".xlsx":
         try:
-            workbook = openpyxl.load_workbook(file_path, data_only=True)
+            # read_only=True: streaming mode — RAM konstan berapapun ukuran file
+            workbook = openpyxl.load_workbook(file_path, data_only=True, read_only=True)
             all_sheets_text = []
             for sheet in workbook.worksheets:
                 sheet_text = f"=== Sheet: {sheet.title} ===\n"

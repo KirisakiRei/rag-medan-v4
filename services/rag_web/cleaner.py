@@ -31,8 +31,19 @@ class Cleaner:
         r"cookie", r"newsletter", r"subscribe"
     ]
     
-    # Classes yang biasanya berisi content
-    ARTICLE_CLASSES = ["content", "article", "post", "entry", "body", "text", "main"]
+    # Classes yang biasanya berisi content (diperluas dengan pola CMS Indonesia)
+    ARTICLE_CLASSES = [
+        # Generic
+        "content", "article", "post", "entry", "body", "text", "main",
+        # Joomla
+        "item-page", "article-content", "com-content-article",
+        # WordPress
+        "entry-content", "post-content", "wp-content",
+        # Gov / Portal Indonesia custom
+        "isi-berita", "konten-berita", "berita-isi", "artikel-isi",
+        "konten-utama", "halaman-konten", "isi-konten", "detail-berita",
+        "berita-detail", "konten-detail", "isi-artikel", "detail-artikel",
+    ]
     
     def __init__(self):
         self.non_content_pattern = re.compile(
@@ -40,39 +51,61 @@ class Cleaner:
             re.IGNORECASE
         )
     
+    def clean_with_selector(self, raw_html: str, css_selector: str, url: str = "") -> str:
+        """Clean HTML menggunakan CSS selector. Fallback ke auto-detect jika selector gagal."""
+        try:
+            soup = BeautifulSoup(raw_html, "html.parser")
+
+            for comment in soup.find_all(string=lambda text: isinstance(text, Comment)):
+                comment.extract()
+            for tag in self.REMOVE_TAGS:
+                for element in soup.find_all(tag):
+                    element.decompose()
+
+            selected = soup.select(css_selector)
+
+            if not selected:
+                logger.warning(f"[CLEANER] Selector '{css_selector}' tidak menemukan elemen, fallback ke auto-detect")
+                return self.clean(raw_html, url)
+
+            combined_text_parts = []
+            for element in selected:
+                text = self._extract_text(element)
+                text = self._normalize_whitespace(text)
+                if text:
+                    combined_text_parts.append(text)
+
+            combined = "\n\n".join(combined_text_parts)
+
+            if len(combined.strip()) < 100:
+                logger.warning(
+                    f"[CLEANER] Selector '{css_selector}' menghasilkan konten terlalu pendek "
+                    f"({len(combined)} chars), fallback ke auto-detect"
+                )
+                return self.clean(raw_html, url)
+
+            logger.info(f"[CLEANER] CSS selector '{css_selector}' berhasil: {len(combined)} chars")
+            return combined.strip()
+
+        except Exception as e:
+            logger.error(f"[CLEANER] Error pada clean_with_selector: {e}, fallback ke auto-detect")
+            return self.clean(raw_html, url)
+
     def clean(self, raw_html: str, url: str = "") -> str:
-        """
-        Clean HTML dan extract text.
-        
-        Args:
-            raw_html: Raw HTML string
-            url: URL untuk logging
-            
-        Returns:
-            Clean text content
-        """
+        """Clean HTML dan extract text (auto-detect mode)."""
         try:
             soup = BeautifulSoup(raw_html, "html.parser")
             
-            # Remove comments
             for comment in soup.find_all(string=lambda text: isinstance(text, Comment)):
                 comment.extract()
             
-            # Remove unwanted tags
             for tag in self.REMOVE_TAGS:
                 for element in soup.find_all(tag):
                     element.decompose()
             
-            # Remove non-content elements
             self._remove_non_content_elements(soup)
-            
-            # Extract main content
             content = self._extract_main_content(soup)
-            
-            # Extract text
             clean_text = self._extract_text(content)
-            
-            # Normalize whitespace
             clean_text = self._normalize_whitespace(clean_text)
             
             logger.info(f"[CLEANER] Cleaned content: {len(clean_text)} chars")
@@ -97,7 +130,7 @@ class Cleaner:
                 element.decompose()
     
     def _extract_main_content(self, soup: BeautifulSoup) -> BeautifulSoup:
-        """Extract main content area."""
+        """Extract main content area dengan fallback bertingkat."""
         # Try article tag
         article = soup.find("article")
         if article and len(article.get_text(strip=True)) > 200:
@@ -108,13 +141,29 @@ class Cleaner:
         if main and len(main.get_text(strip=True)) > 200:
             return main
         
-        # Try common content classes
+        # Try common content classes (termasuk CMS Indonesia)
         for class_name in self.ARTICLE_CLASSES:
             content_div = soup.find("div", class_=re.compile(class_name, re.I))
             if content_div and len(content_div.get_text(strip=True)) > 200:
                 return content_div
-        
-        # Fallback to body
+
+        # Fallback: text-density heuristic
+        best_element = None
+        best_ratio = 0.0
+        for div in soup.find_all("div"):
+            html_len = len(str(div))
+            text_len = len(div.get_text(strip=True))
+            if html_len > 200 and text_len > 150:
+                ratio = text_len / html_len
+                if ratio > best_ratio and ratio > 0.25:
+                    best_ratio = ratio
+                    best_element = div
+
+        if best_element is not None:
+            logger.debug(f"[CLEANER] Text-density heuristic: ratio={best_ratio:.2f}, chars={len(best_element.get_text(strip=True))}")
+            return best_element
+
+        # Final fallback to body
         body = soup.find("body")
         return body if body else soup
     

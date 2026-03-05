@@ -23,82 +23,151 @@ def set_instances(qdrant_client: AsyncQdrantClient):
 
 
 async def soft_delete_document(doc_id: str) -> Dict[str, Any]:
-
+    """
+    Soft-delete semua chunk milik doc_id.
+    Menggunakan pagination loop — menangani dokumen dengan >100 chunk.
+    """
     try:
-        results = await qdrant.scroll(
-            collection_name=config.COLLECTION_DOCUMENT,
-            scroll_filter=qdrant_models.Filter(
-                must=[
-                    qdrant_models.FieldCondition(
-                        key="mysql_id",
-                        match=qdrant_models.MatchValue(value=doc_id)
-                    )
-                ]
-            ),
-            limit=100,
-            with_payload=True
-        )
-        
-        points = results[0] if results else []
-        
-        if not points:
+        all_point_ids = []
+        offset = None
+
+        while True:
+            results = await qdrant.scroll(
+                collection_name=config.COLLECTION_DOCUMENT,
+                scroll_filter=qdrant_models.Filter(
+                    must=[
+                        qdrant_models.FieldCondition(
+                            key="mysql_id",
+                            match=qdrant_models.MatchValue(value=doc_id)
+                        )
+                    ]
+                ),
+                limit=100,
+                offset=offset,
+                with_payload=True
+            )
+            batch = results[0] if results else []
+            next_offset = results[1] if results and len(results) > 1 else None
+            all_point_ids.extend([p.id for p in batch])
+            if next_offset is None:
+                break
+            offset = next_offset
+
+        if not all_point_ids:
             return {"status": "not_found", "deleted": 0}
-        
-        point_ids = [p.id for p in points]
-        
+
         await qdrant.set_payload(
             collection_name=config.COLLECTION_DOCUMENT,
             payload={
                 "is_deleted": True,
                 "deleted_at": datetime.utcnow().isoformat()
             },
-            points=point_ids
+            points=all_point_ids
         )
-        
-        logger.info(f"[SOFT-DELETE] Soft deleted {len(point_ids)} chunks for doc_id={doc_id}")
-        
-        return {"status": "deleted", "deleted": len(point_ids)}
-        
+
+        logger.info(f"[SOFT-DELETE] Soft deleted {len(all_point_ids)} chunks untuk doc_id={doc_id}")
+        return {"status": "deleted", "deleted": len(all_point_ids)}
+
     except Exception as e:
         logger.exception(f"[SOFT-DELETE] Error: {e}")
         return {"status": "error", "error": str(e)}
 
 
 async def hard_delete_document(doc_id: str) -> Dict[str, Any]:
+    """
+    Hard-delete (permanen) semua chunk milik doc_id.
+    Menggunakan pagination loop — menangani dokumen dengan >100 chunk.
+    """
     try:
-        # Get all chunks with mysql_id
-        results = await qdrant.scroll(
-            collection_name=config.COLLECTION_DOCUMENT,
-            scroll_filter=qdrant_models.Filter(
-                must=[
-                    qdrant_models.FieldCondition(
-                        key="mysql_id",  # PERSIS V2: mysql_id bukan doc_id
-                        match=qdrant_models.MatchValue(value=doc_id)
-                    )
-                ]
-            ),
-            limit=100,
-            with_payload=False,
-            with_vectors=False
-        )
-        
-        points = results[0] if results else []
-        
-        if not points:
+        all_point_ids = []
+        offset = None
+
+        while True:
+            results = await qdrant.scroll(
+                collection_name=config.COLLECTION_DOCUMENT,
+                scroll_filter=qdrant_models.Filter(
+                    must=[
+                        qdrant_models.FieldCondition(
+                            key="mysql_id",
+                            match=qdrant_models.MatchValue(value=doc_id)
+                        )
+                    ]
+                ),
+                limit=100,
+                offset=offset,
+                with_payload=False,
+                with_vectors=False
+            )
+            batch = results[0] if results else []
+            next_offset = results[1] if results and len(results) > 1 else None
+            all_point_ids.extend([p.id for p in batch])
+            if next_offset is None:
+                break
+            offset = next_offset
+
+        if not all_point_ids:
             return {"status": "not_found", "deleted": 0}
-        
-        point_ids = [p.id for p in points]
-        
-        # Delete points
+
         await qdrant.delete(
             collection_name=config.COLLECTION_DOCUMENT,
-            points_selector=qdrant_models.PointIdsList(points=point_ids)
+            points_selector=qdrant_models.PointIdsList(points=all_point_ids)
         )
-        
-        logger.info(f"[HARD-DELETE] Deleted {len(point_ids)} chunks for doc_id={doc_id}")
-        
-        return {"status": "deleted", "deleted": len(point_ids)}
-        
+
+        logger.info(f"[HARD-DELETE] Deleted {len(all_point_ids)} chunks untuk doc_id={doc_id}")
+        return {"status": "deleted", "deleted": len(all_point_ids)}
+
     except Exception as e:
         logger.exception(f"[HARD-DELETE] Error: {e}")
+        return {"status": "error", "error": str(e)}
+
+
+async def reactivate_document(doc_id: str) -> Dict[str, Any]:
+    """
+    Pulihkan semua chunk soft-deleted milik doc_id (is_deleted=False).
+    Menggunakan pagination loop — menangani dokumen dengan >100 chunk.
+    """
+    try:
+        all_point_ids = []
+        offset = None
+
+        while True:
+            results = await qdrant.scroll(
+                collection_name=config.COLLECTION_DOCUMENT,
+                scroll_filter=qdrant_models.Filter(
+                    must=[
+                        qdrant_models.FieldCondition(
+                            key="mysql_id",
+                            match=qdrant_models.MatchValue(value=doc_id)
+                        )
+                    ]
+                ),
+                limit=100,
+                offset=offset,
+                with_payload=False
+            )
+            batch = results[0] if results else []
+            next_offset = results[1] if results and len(results) > 1 else None
+            all_point_ids.extend([p.id for p in batch])
+            if next_offset is None:
+                break
+            offset = next_offset
+
+        if not all_point_ids:
+            return {"status": "not_found", "reactivated": 0}
+
+        await qdrant.set_payload(
+            collection_name=config.COLLECTION_DOCUMENT,
+            payload={
+                "is_deleted": False,
+                "deleted_at": None,
+                "reactivated_at": datetime.utcnow().isoformat()
+            },
+            points=all_point_ids
+        )
+
+        logger.info(f"[REACTIVATE] Dipulihkan {len(all_point_ids)} chunks untuk doc_id={doc_id}")
+        return {"status": "reactivated", "reactivated": len(all_point_ids)}
+
+    except Exception as e:
+        logger.exception(f"[REACTIVATE] Error: {e}")
         return {"status": "error", "error": str(e)}

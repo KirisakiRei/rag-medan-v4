@@ -226,14 +226,15 @@ async def internal_search_unified(request: UnifiedSearchRequest):
 @app.post("/internal/sync")
 async def internal_sync(request: SyncRequest):
     """Internal sync endpoint - trigger OCR worker."""
-    logger.info(f"[SYNC] doc_id={request.doc_id}")
-    
+    logger.info(f"[SYNC] doc_id={request.doc_id} | org={request.organization_id} | filename={request.filename}")
+
     result = await sync_module.sync_document(
         doc_id=request.doc_id,
         file_url=request.file_url,
-        opd_name=request.opd_name
+        organization_id=request.organization_id,
+        filename=request.filename
     )
-    
+
     return JSONResponse(status_code=200, content=result)
 
 
@@ -241,17 +242,17 @@ async def internal_sync(request: SyncRequest):
 async def get_task_status(task_id: str):
     """Get task status."""
     result = sync_module.get_task_status(task_id)
-    
-    if result.get("status") == "not_found":
+
+    if result is None:
         raise HTTPException(status_code=404, detail="Task not found")
-    
+
     return result
 
 
 @app.get("/internal/sync/tasks")
 async def list_tasks():
     """List all tasks."""
-    return sync_module.list_all_tasks()
+    return sync_module.get_all_tasks()
 
 
 @app.delete("/internal/delete")

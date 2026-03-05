@@ -64,9 +64,15 @@ async def store_chunks(
             "is_deleted": False,
             "created_at": now,
             "updated_at": now,
+            # Tambahan: content_type dan faq_question dari chunk metadata
+            "content_type": chunk.metadata.get("content_type", "general"),
+            "faq_question": chunk.metadata.get("faq_question", None),
             "metadata": metadata or {}
         }
-        
+
+        # Hapus key None agar payload bersih
+        payload = {k: v for k, v in payload.items() if v is not None}
+
         points.append(PointStruct(id=point_id, vector=embedding, payload=payload))
     
     await qdrant.upsert(collection_name=config.COLLECTION_WEB, points=points)
@@ -165,33 +171,110 @@ async def hard_delete_by_link_id(link_id: str) -> int:
 async def process_url(
     link_id: str,
     url: str,
+    css_selector: Optional[str] = None,
+    use_js_renderer: Optional[bool] = None,
+    wait_selector: Optional[str] = None,
+    content_type: str = "general",
+    faq_question_selector: Optional[str] = None,
+    faq_answer_selector: Optional[str] = None,
+    force_rescrape: bool = False,
+    callback_url: Optional[str] = None,
     metadata: Optional[Dict[str, Any]] = None
 ) -> Dict[str, Any]:
-    """Process URL: scrape → clean → chunk → embed → store."""
+    """Pipeline: scrape → clean/extract → chunk → embed → store."""
+    from services.rag_web.webhook import send_callback
+
     try:
-        logger.info(f"[SYNC] Processing URL: {url}")
-        
-        # 1. Scrape
-        scraped = await scraper.scrape(url)
+        logger.info(
+            f"[SYNC] process_url start: link_id={link_id}, url={url}, "
+            f"content_type={content_type}, css_selector={css_selector}, "
+            f"use_js_renderer={use_js_renderer}, force_rescrape={force_rescrape}"
+        )
+
+
+        if not force_rescrape:
+            existing = await get_chunks_by_link_id(link_id)
+            if existing:
+                logger.info(
+                    f"[SYNC] link_id={link_id} sudah ada ({len(existing)} chunks). "
+                    "Gunakan force_rescrape=True untuk memproses ulang."
+                )
+                result = {
+                    "status": "skipped",
+                    "reason": "already_exists",
+                    "link_id": link_id,
+                    "url": url,
+                    "chunks_count": len(existing),
+                }
+                await send_callback(link_id, url, "skipped", result, callback_url)
+                return result
+
+        await send_callback(link_id, url, "scraping", {})
+        scraped = await scraper.scrape(
+            url=url,
+            use_js_renderer=use_js_renderer,
+            wait_selector=wait_selector,
+        )
         raw_html = scraped.get("raw_html", "")
-        
-        # 2. Clean
-        clean_content = cleaner.clean(raw_html, url)
+
+
         title = cleaner.extract_title(raw_html)
-        
-        if not clean_content or len(clean_content.strip()) < 50:
-            raise Exception("Content too short or empty")
-        
-        # 3. Chunk
-        chunks = chunker.chunk(clean_content, url)
+
+
+        chunks: List[Chunk] = []
+
+        if content_type == "faq":
+            # Mode FAQ: ekstrak pasangan Q&A
+            from services.rag_web.faq_extractor import extract_faq_pairs
+
+            pairs = extract_faq_pairs(
+                raw_html=raw_html,
+                question_selector=faq_question_selector,
+                answer_selector=faq_answer_selector,
+            )
+
+            if pairs:
+                logger.info(f"[SYNC] FAQ mode: {len(pairs)} pasangan Q&A ditemukan")
+                chunks = chunker.chunk_faq(pairs, url)
+                base_metadata = {
+                    **(metadata or {}),
+                    "content_type": "faq",
+                    "faq_pairs_count": len(pairs),
+                }
+            else:
+                logger.warning(
+                    "[SYNC] FAQ mode: tidak ada pasangan Q&A terdeteksi, "
+                    "fallback ke general extraction"
+                )
+                # Fallback ke general
+                content_type = "general"
+
+        if content_type in ("general", "article") or (content_type == "faq" and not chunks):
+            # Mode general/article: clean → chunk
+            if css_selector:
+                clean_content = cleaner.clean_with_selector(raw_html, css_selector, url)
+            else:
+                clean_content = cleaner.clean(raw_html, url)
+
+            if not clean_content or len(clean_content.strip()) < 50:
+                raise Exception(
+                    f"Konten terlalu pendek atau kosong setelah cleaning ({len(clean_content or '')} chars)"
+                )
+
+            chunks = chunker.chunk(clean_content, url)
+            base_metadata = {
+                **(metadata or {}),
+                "content_type": content_type,
+            }
+
         if not chunks:
-            raise Exception("No chunks created")
-        
-        # 4. Embed
+            raise Exception("Tidak ada chunk yang berhasil dibuat")
+
+
         chunk_texts = [chunk.content for chunk in chunks]
         embeddings = await encode_texts(chunk_texts, model=model, prefix="passage: ")
-        
-        # 5. Delete existing dan store baru
+
+
         await hard_delete_by_link_id(link_id)
         await store_chunks(
             link_id=link_id,
@@ -199,27 +282,40 @@ async def process_url(
             title=title,
             chunks=chunks,
             embeddings=embeddings,
-            metadata=metadata
+            metadata=base_metadata
         )
-        
-        logger.info(f"[SYNC] Completed: {len(chunks)} chunks stored for link_id={link_id}")
-        
-        return {
+
+
+        result = {
             "status": "success",
             "link_id": link_id,
             "url": url,
             "title": title,
             "chunks_count": len(chunks),
-            "content_length": len(clean_content)
+            "content_length": sum(len(c.content) for c in chunks),
+            "content_type": content_type,
         }
-        
+        if content_type == "faq" and "faq_pairs_count" in base_metadata:
+            result["faq_pairs_count"] = base_metadata["faq_pairs_count"]
+
+        logger.info(
+            f"[SYNC] Selesai: {len(chunks)} chunks untuk link_id={link_id} "
+            f"(content_type={content_type})"
+        )
+
+        await send_callback(link_id, url, "completed", result, callback_url)
+        return result
+
     except Exception as e:
-        logger.exception(f"[SYNC] Error processing URL: {e}")
-        return {
-            "status": "error",
+        logger.exception(f"[SYNC] Error processing URL link_id={link_id}: {e}")
+        error_result = {
+            "status": "failed",
             "link_id": link_id,
-            "error": str(e)
+            "url": url,
+            "error": str(e),
         }
+        await send_callback(link_id, url, "failed", error_result, callback_url)
+        return error_result
 
 
 async def sync_edited_content(

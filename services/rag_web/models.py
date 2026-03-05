@@ -23,7 +23,22 @@ class TriggerRequest(BaseModel):
     """Request untuk trigger scraping."""
     link_id: str = Field(..., description="Unique ID dari link")
     url: str = Field(..., description="URL yang akan di-scrape")
-    callback_url: Optional[str] = Field(None, description="Custom callback URL")
+
+    # Content extraction options
+    content_type: str = Field("general", description="Tipe konten: general | article | faq")
+    css_selector: Optional[str] = Field(None, description="CSS selector untuk target konten spesifik (contoh: div.berita-isi)")
+
+    # JavaScript rendering options
+    use_js_renderer: Optional[bool] = Field(None, description="True=paksa Playwright, False=paksa httpx, None=auto-detect")
+    wait_selector: Optional[str] = Field(None, description="CSS selector yang ditunggu muncul sebelum ambil HTML (hanya untuk JS renderer)")
+
+    # FAQ extraction options
+    faq_question_selector: Optional[str] = Field(None, description="CSS selector untuk elemen pertanyaan FAQ")
+    faq_answer_selector: Optional[str] = Field(None, description="CSS selector untuk elemen jawaban FAQ")
+
+    # Processing control
+    force_rescrape: bool = Field(False, description="Paksa re-scrape meski link_id sudah ada")
+    callback_url: Optional[str] = Field(None, description="Custom callback URL (override global config)")
     metadata: Optional[dict] = Field(default_factory=dict)
 
 

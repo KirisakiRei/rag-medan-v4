@@ -16,6 +16,9 @@
 const path = require('path');
 const os = require('os');
 
+// ── Ubah HANYA nilai ini untuk mengganti port orchestrator ──
+const ORCHESTRATOR_PORT = 5100;
+
 // Detect OS and set correct Python path
 const isWindows = os.platform() === 'win32';
 const pythonPath = isWindows 
@@ -28,12 +31,12 @@ module.exports = {
     {
       name: "orchestrator",
       script: pythonPath,
-      args: "-m uvicorn orchestrator.orchestrator:app --host 0.0.0.0 --port 5001",
+      args: `-m uvicorn orchestrator.orchestrator:app --host 0.0.0.0 --port ${ORCHESTRATOR_PORT}`,
       cwd: __dirname,
       interpreter: "none",
       env: {
         PYTHONPATH: __dirname,
-        ORCHESTRATOR_PORT: 5001,
+        ORCHESTRATOR_PORT: ORCHESTRATOR_PORT,
         PYTHONMALLOC: "malloc",
         MALLOC_TRIM_THRESHOLD_: "100000"
       },
