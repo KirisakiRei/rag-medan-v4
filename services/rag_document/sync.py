@@ -162,6 +162,7 @@ def _send_callback(
 ):
     callback_url = config.DOCUMENT_CALLBACK_URL
     if not callback_url:
+        logger.warning(f"[CALLBACK] DOCUMENT_CALLBACK_URL kosong, skip callback untuk task={task_id}")
         return
 
     import requests as req
@@ -176,9 +177,16 @@ def _send_callback(
     api_key = config.WEB_MANAJEMEN_API_KEY
     if api_key:
         headers["X-API-Key"] = api_key
+    else:
+        logger.warning(f"[CALLBACK] WEB_MANAJEMEN_API_KEY kosong untuk task={task_id}; request tetap dikirim tanpa header X-API-Key")
 
     url = f"{callback_url.rstrip('/')}/{doc_id}"
     max_attempts = 3
+
+    logger.info(
+        f"[CALLBACK] Mengirim callback task={task_id} doc_id={doc_id} "
+        f"sync_status={sync_status} message='{message[:120]}' url={url}"
+    )
 
     for attempt in range(1, max_attempts + 1):
         try:
@@ -192,7 +200,11 @@ def _send_callback(
             if resp.status_code < 400:
                 logger.info(f"[CALLBACK] Berhasil ({resp.status_code}) untuk doc_id={doc_id} -> {sync_status}")
                 return
-            logger.warning(f"[CALLBACK] Attempt {attempt}/{max_attempts} HTTP {resp.status_code} untuk doc_id={doc_id}")
+            resp_text = (resp.text or "")[:300]
+            logger.warning(
+                f"[CALLBACK] Attempt {attempt}/{max_attempts} HTTP {resp.status_code} "
+                f"untuk doc_id={doc_id} | body={resp_text}"
+            )
         except Exception as e:
             logger.warning(f"[CALLBACK] Attempt {attempt}/{max_attempts} error untuk doc_id={doc_id}: {e}")
 
@@ -218,6 +230,10 @@ def _update_task_with_optional_callback(
     sync_status = _SYNC_STATUS_MAP.get(status, "failed")
     normalized_stage = _normalize_callback_stage(callback_stage, status)
     if not _should_send_callback(task_id, sync_status, normalized_stage):
+        logger.info(
+            f"[CALLBACK] Skip duplicate callback task={task_id} "
+            f"sync_status={sync_status} stage={normalized_stage}"
+        )
         return
 
     callback_message = _build_callback_message(status, normalized_stage, message, total_chunks)
