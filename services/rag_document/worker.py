@@ -1,95 +1,92 @@
 """
-Document Worker — RAG Medan v3
-Subprocess OCR pipeline. Menerima params via stdin JSON, output via stdout JSON.
-
-Ported & updated from rag-medan-v2 core/document_pipeline.py + core/ocr_worker.py
-
-Bug fixes dari v3 lama:
-  - B1: import extract_text_from_file (bukan extract_text_from_pdf/image/docx/xlsx yang tidak ada)
-  - B2: worker tidak import dari sync.py — output via stdout JSON saja
-  - B3: baca params dari stdin JSON (bukan argparse CLI args)
-  - B4: payload Qdrant menggunakan field names yang seragam dengan search.py
-
-Fitur baru dari v2:
-  - _resolve_file(): SSL bypass, timeout terpisah, streaming write, error handling spesifik
-  - Temp file di document_temp/{YYYY-MM-DD}/ dengan nama bermakna, auto-cleanup
-  - Two-layer dedup: file_hash (pre-OCR) + content_hash (post-OCR)
-  - reactivate_document(): pulihkan chunk soft-deleted tanpa re-OCR
-  - Dispatch chunking: .xlsx -> chunk_xlsx(), lainnya -> semantic_chunk()
-  - Batch embedding: model.encode(batch_size=32, normalize_embeddings=True)
-  - Payload per chunk: mysql_id, organization_id, filename, text, file_hash, is_deleted, dll
+Document Worker - RAG Medan v3
+Subprocess OCR pipeline. Menerima params via stdin JSON, output final via stdout JSON.
 """
-import os
-import sys
 import json
-import uuid
-import re
 import logging
-import hashlib
+import os
+import re
+import sys
+import time
+import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Tuple
-
-import urllib3
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+from typing import Callable, List, Optional, Tuple
+from urllib.parse import unquote, urlparse
 
 import requests
-from urllib.parse import urlparse, unquote
+import urllib3
+from qdrant_client import QdrantClient
+from qdrant_client.http import models as qdrant_models
+from qdrant_client.http.models import Distance, PointStruct, VectorParams
+from sentence_transformers import SentenceTransformer
 
-# Setup path
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from config import config
 from shared.logging_config import setup_logging
-from shared.ocr_utils import extract_text_from_file, calculate_file_hash, calculate_content_hash
-from services.rag_document.chunker import semantic_chunk, chunk_xlsx
-
-from sentence_transformers import SentenceTransformer
-from qdrant_client import QdrantClient
-from qdrant_client.http import models as qdrant_models
-from qdrant_client.http.models import PointStruct, Distance, VectorParams
+from shared.ocr_utils import (
+    calculate_content_hash,
+    calculate_file_hash,
+    extract_text_from_file,
+)
+from services.rag_document.chunker import chunk_xlsx, semantic_chunk
 
 logger = setup_logging("document_worker")
 
-# Root direktori project (2 level di atas services/)
+for handler in logger.handlers:
+    if isinstance(handler, logging.StreamHandler) and not isinstance(handler, logging.FileHandler):
+        handler.setStream(sys.stderr)
+
 _PROJECT_ROOT = Path(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+_PROGRESS_PREFIX = "__PROGRESS__"
+_EMBED_BATCH_SIZE = 32
+_UPSERT_BATCH_SIZE = 50
 
 
-# ============================================================
-# File Download & Temp Management
-# ============================================================
+def emit_progress(stage: str, message: str, **extra) -> None:
+    payload = {
+        "stage": stage,
+        "message": message,
+        "timestamp": datetime.utcnow().isoformat(),
+    }
+    payload.update(extra)
+    print(f"{_PROGRESS_PREFIX}{json.dumps(payload, ensure_ascii=False)}", file=sys.stderr, flush=True)
+
+
+def _safe_pct(numerator: int, denominator: int) -> int:
+    if denominator <= 0:
+        return 0
+    return max(0, min(100, int((numerator / denominator) * 100)))
+
 
 def _sanitize_filename(name: str) -> str:
-    """Sanitasi nama file agar aman untuk path."""
-    name = re.sub(r'[^\w\s\-.]', '', name)
-    name = re.sub(r'\s+', '-', name.strip())
-    return name[:80]  # potong jika terlalu panjang
+    name = re.sub(r"[^\w\s\-.]", "", name)
+    name = re.sub(r"\s+", "-", name.strip())
+    return name[:80]
 
 
 def _resolve_file(
     url: str,
     doc_id: str = "doc",
-    user_filename: Optional[str] = None
+    user_filename: Optional[str] = None,
+    progress_callback: Optional[Callable[..., None]] = None,
 ) -> Tuple[str, bool]:
     """
     Resolve URL file ke path lokal.
 
     - File lokal: return (path, False)
     - File remote: download ke document_temp/{YYYY-MM-DD}/, return (path, True)
-
-    Returns:
-        (local_path, is_temp) — is_temp=True berarti file harus dihapus setelah proses
     """
-    # File lokal
     if not url.startswith(("http://", "https://")):
         return (url, False)
 
-    # Tentukan nama file
     parsed_url = urlparse(url)
     url_filename = unquote(Path(parsed_url.path).name)
 
     if user_filename:
-        # Pakai user_filename, tambah ekstensi dari URL jika belum ada
         user_ext = os.path.splitext(user_filename)[1]
         url_ext = os.path.splitext(url_filename)[1]
         if not user_ext and url_ext:
@@ -99,9 +96,8 @@ def _resolve_file(
     else:
         safe_name = _sanitize_filename(url_filename) if url_filename else "document"
 
-    # Buat folder temp per tanggal
-    date_str = datetime.now().strftime('%Y-%m-%d')
-    time_str = datetime.now().strftime('%H%M%S')
+    date_str = datetime.now().strftime("%Y-%m-%d")
+    time_str = datetime.now().strftime("%H%M%S")
     temp_dir = _PROJECT_ROOT / "document_temp" / date_str
     temp_dir.mkdir(parents=True, exist_ok=True)
 
@@ -110,64 +106,88 @@ def _resolve_file(
 
     logger.info(f"[DOWNLOAD] Mengunduh dari {url}")
     logger.info(f"[DOWNLOAD] Simpan ke {temp_file_path}")
+    if progress_callback:
+        progress_callback(stage="downloading", message="Memulai download file dokumen...")
 
     try:
         http_response = requests.get(
             url,
-            timeout=(10, 120),   # connect 10s, read 120s
-            verify=False,         # bypass SSL cert untuk LAN self-signed
+            timeout=(10, config.OCR_TIMEOUT),
+            verify=False,
             allow_redirects=True,
-            stream=True           # streaming — RAM konstan ~8 KB
+            stream=True,
         )
 
-        # Error handling spesifik per HTTP status
         if http_response.status_code == 404:
             raise FileNotFoundError(f"File tidak ditemukan di server (404): {url}")
-        elif http_response.status_code == 403:
+        if http_response.status_code == 403:
             raise PermissionError(f"Akses ditolak (403): {url}")
-        elif http_response.status_code >= 500:
+        if http_response.status_code >= 500:
             raise ConnectionError(f"Server mengalami gangguan (HTTP {http_response.status_code}): {url}")
-        elif not http_response.ok:
+        if not http_response.ok:
             raise IOError(f"Gagal mengunduh file (HTTP {http_response.status_code}): {url}")
 
-        # Tulis per chunk ke disk — RAM konstan berapapun ukuran file
         downloaded_bytes = 0
+        content_length = int(http_response.headers.get("content-length", "0") or 0)
+        progress_step_bytes = max(1, config.OCR_DOWNLOAD_PROGRESS_MB) * 1024 * 1024
+        next_progress_mark = progress_step_bytes
+        last_progress_log = time.time()
+
         with open(temp_file_path, "wb") as f:
             for chunk in http_response.iter_content(chunk_size=8192):
-                if chunk:
-                    f.write(chunk)
-                    downloaded_bytes += len(chunk)
+                if not chunk:
+                    continue
+                f.write(chunk)
+                downloaded_bytes += len(chunk)
+
+                now = time.time()
+                if progress_callback and (
+                    downloaded_bytes >= next_progress_mark or
+                    (now - last_progress_log) >= 10
+                ):
+                    if content_length > 0:
+                        msg = (
+                            f"Download dokumen {_safe_pct(downloaded_bytes, content_length)}% "
+                            f"({downloaded_bytes // (1024 * 1024)}MB/{content_length // (1024 * 1024)}MB)"
+                        )
+                    else:
+                        msg = f"Download dokumen {downloaded_bytes // (1024 * 1024)}MB"
+                    progress_callback(
+                        stage="downloading",
+                        message=msg,
+                        downloaded_bytes=downloaded_bytes,
+                        total_bytes=content_length,
+                    )
+                    next_progress_mark = downloaded_bytes + progress_step_bytes
+                    last_progress_log = now
 
         logger.info(f"[DOWNLOAD] Selesai: {downloaded_bytes / 1024:.1f} KB")
+        if progress_callback:
+            progress_callback(
+                stage="downloading",
+                message="Download dokumen selesai.",
+                downloaded_bytes=downloaded_bytes,
+                total_bytes=content_length,
+            )
         return (temp_file_path, True)
 
     except requests.exceptions.ConnectTimeout:
         raise ConnectionError(f"Koneksi timeout saat menghubungi server: {url}")
     except requests.exceptions.ReadTimeout:
-        raise TimeoutError(f"Download melebihi 120 detik (file terlalu besar atau koneksi lambat): {url}")
+        raise TimeoutError(f"Download melebihi batas baca ({config.OCR_TIMEOUT} detik): {url}")
     except requests.exceptions.ConnectionError as e:
-        raise ConnectionError(f"Tidak dapat terhubung ke server: {url} — {e}")
+        raise ConnectionError(f"Tidak dapat terhubung ke server: {url} - {e}")
     except (FileNotFoundError, PermissionError, ConnectionError, TimeoutError, IOError):
-        raise  # re-raise error yang sudah spesifik
+        raise
     except Exception as e:
-        raise IOError(f"Gagal mengunduh file: {url} — {e}")
+        raise IOError(f"Gagal mengunduh file: {url} - {e}")
 
-
-# ============================================================
-# Deduplication
-# ============================================================
 
 def check_duplicate_by_file_hash(
     qdrant: QdrantClient,
     collection_name: str,
-    file_hash: str
+    file_hash: str,
 ) -> dict:
-    """
-    Cek duplikat berdasarkan file_hash di Qdrant (pre-OCR check).
-
-    Returns:
-        {"exists": bool, "point": PointStruct|None, "is_deleted": bool}
-    """
     try:
         results, _ = qdrant.scroll(
             collection_name=collection_name,
@@ -175,12 +195,12 @@ def check_duplicate_by_file_hash(
                 must=[
                     qdrant_models.FieldCondition(
                         key="file_hash",
-                        match=qdrant_models.MatchValue(value=file_hash)
+                        match=qdrant_models.MatchValue(value=file_hash),
                     )
                 ]
             ),
             limit=1,
-            with_payload=True
+            with_payload=True,
         )
         if results:
             is_deleted = results[0].payload.get("is_deleted", False)
@@ -193,14 +213,8 @@ def check_duplicate_by_file_hash(
 def check_duplicate_by_content_hash(
     qdrant: QdrantClient,
     collection_name: str,
-    content_hash: str
+    content_hash: str,
 ) -> dict:
-    """
-    Cek duplikat berdasarkan content_hash di Qdrant (post-OCR check).
-
-    Returns:
-        {"exists": bool, "is_deleted": bool}
-    """
     try:
         results, _ = qdrant.scroll(
             collection_name=collection_name,
@@ -208,33 +222,22 @@ def check_duplicate_by_content_hash(
                 must=[
                     qdrant_models.FieldCondition(
                         key="content_hash",
-                        match=qdrant_models.MatchValue(value=content_hash)
+                        match=qdrant_models.MatchValue(value=content_hash),
                     )
                 ]
             ),
             limit=1,
-            with_payload=True
+            with_payload=True,
         )
         if results:
             is_deleted = results[0].payload.get("is_deleted", False)
-            return {"exists": True, "is_deleted": is_deleted}
+            return {"exists": True, "point": results[0], "is_deleted": is_deleted}
     except Exception as e:
         logger.warning(f"[DEDUP] Gagal cek content_hash: {e}")
-    return {"exists": False, "is_deleted": False}
+    return {"exists": False, "point": None, "is_deleted": False}
 
-
-# ============================================================
-# Reactivate (tanpa re-OCR)
-# ============================================================
 
 def reactivate_document(qdrant: QdrantClient, collection_name: str, doc_id: str) -> int:
-    """
-    Pulihkan semua chunk soft-deleted milik doc_id.
-    Menggunakan pagination loop — menangani dokumen dengan >100 chunk.
-
-    Returns:
-        Jumlah chunk yang dipulihkan
-    """
     all_point_ids = []
     offset = None
     now = datetime.utcnow().isoformat()
@@ -246,13 +249,13 @@ def reactivate_document(qdrant: QdrantClient, collection_name: str, doc_id: str)
                 must=[
                     qdrant_models.FieldCondition(
                         key="mysql_id",
-                        match=qdrant_models.MatchValue(value=doc_id)
+                        match=qdrant_models.MatchValue(value=doc_id),
                     )
                 ]
             ),
             limit=100,
             offset=offset,
-            with_payload=False
+            with_payload=False,
         )
         all_point_ids.extend([p.id for p in results])
         if next_offset is None:
@@ -263,25 +266,16 @@ def reactivate_document(qdrant: QdrantClient, collection_name: str, doc_id: str)
         qdrant.set_payload(
             collection_name=collection_name,
             payload={"is_deleted": False, "deleted_at": None, "reactivated_at": now},
-            points=all_point_ids
+            points=all_point_ids,
         )
         logger.info(f"[REACTIVATE] {len(all_point_ids)} chunk dipulihkan untuk doc_id={doc_id}")
 
     return len(all_point_ids)
 
 
-# ============================================================
-# XLSX row extraction untuk chunker
-# ============================================================
-
 def _extract_xlsx_rows(file_path: str):
-    """
-    Ekstrak rows dari XLSX menggunakan read_only=True (streaming).
-
-    Returns:
-        List[List[str]] — list baris, rows[0] = header
-    """
     import openpyxl
+
     all_rows = []
     try:
         wb = openpyxl.load_workbook(file_path, data_only=True, read_only=True)
@@ -295,9 +289,112 @@ def _extract_xlsx_rows(file_path: str):
     return all_rows
 
 
-# ============================================================
-# Main pipeline
-# ============================================================
+def _build_chunk_items(
+    file_ext: str,
+    extracted_pages: dict,
+    file_path: str,
+) -> List[dict]:
+    if file_ext in [".xlsx", ".xls"]:
+        rows = _extract_xlsx_rows(file_path)
+        chunks = chunk_xlsx(rows, rows_per_chunk=30, max_size=config.CHUNK_SIZE)
+        return [{"page_number": 1, "text": chunk} for chunk in chunks]
+
+    chunk_items: List[dict] = []
+    for page_number, page_text in sorted(extracted_pages.items(), key=lambda x: x[0]):
+        if not page_text or not page_text.strip():
+            continue
+        page_chunks = semantic_chunk(
+            page_text,
+            chunk_size=config.CHUNK_SIZE,
+            overlap=config.CHUNK_OVERLAP,
+        )
+        for chunk in page_chunks:
+            if chunk and chunk.strip():
+                chunk_items.append({"page_number": page_number, "text": chunk})
+    return chunk_items
+
+
+def _get_existing_doc_id(point: Optional[object]) -> Optional[str]:
+    payload = getattr(point, "payload", None) or {}
+    if isinstance(payload, dict):
+        return payload.get("mysql_id")
+    return None
+
+
+def _embed_with_shared_service(texts: List[str]) -> List[List[float]]:
+    response = requests.post(
+        f"{config.SHARED_EMBEDDING_URL.rstrip('/')}/embed",
+        json={
+            "texts": texts,
+            "prefix": "passage: ",
+            "model_size": "large",
+        },
+        timeout=max(120, config.OCR_TIMEOUT),
+    )
+    response.raise_for_status()
+    payload = response.json()
+    return payload.get("embeddings", [])
+
+
+def _embed_chunks(
+    chunk_items: List[dict],
+    progress_callback: Callable[..., None],
+) -> List[List[float]]:
+    total_chunks = len(chunk_items)
+    all_embeddings: List[List[float]] = []
+    local_model: Optional[SentenceTransformer] = None
+    use_shared = config.USE_SHARED_EMBEDDING
+
+    for start in range(0, total_chunks, _EMBED_BATCH_SIZE):
+        end = min(start + _EMBED_BATCH_SIZE, total_chunks)
+        batch_items = chunk_items[start:end]
+        batch_texts = [item["text"] for item in batch_items]
+        progress_callback(
+            stage="embedding",
+            message=f"Embedding chunk {start + 1}-{end}/{total_chunks}...",
+            processed_chunks=start,
+            total_chunks=total_chunks,
+        )
+
+        if use_shared:
+            try:
+                batch_embeddings = _embed_with_shared_service(batch_texts)
+            except Exception as e:
+                logger.warning(f"[EMBED] Shared embedding gagal, fallback lokal: {e}")
+                progress_callback(
+                    stage="embedding",
+                    message="Shared embedding tidak tersedia, fallback ke model lokal...",
+                    processed_chunks=start,
+                    total_chunks=total_chunks,
+                )
+                use_shared = False
+                local_model = SentenceTransformer(config.EMBEDDING_MODEL_PATH_LARGE)
+                batch_embeddings = local_model.encode(
+                    [f"passage: {text}" for text in batch_texts],
+                    batch_size=len(batch_texts),
+                    normalize_embeddings=True,
+                    show_progress_bar=False,
+                ).tolist()
+        else:
+            if local_model is None:
+                local_model = SentenceTransformer(config.EMBEDDING_MODEL_PATH_LARGE)
+            batch_embeddings = local_model.encode(
+                [f"passage: {text}" for text in batch_texts],
+                batch_size=len(batch_texts),
+                normalize_embeddings=True,
+                show_progress_bar=False,
+            ).tolist()
+
+        all_embeddings.extend(batch_embeddings)
+        progress_callback(
+            stage="embedding",
+            message=f"Embedding selesai {end}/{total_chunks} chunk.",
+            processed_chunks=end,
+            total_chunks=total_chunks,
+        )
+
+    return all_embeddings
+
 
 def process_document(
     task_id: str,
@@ -307,31 +404,27 @@ def process_document(
     file_url: str,
     collection_name: str,
     lang: str = "id",
-    skip_dedup_check: bool = False
+    skip_dedup_check: bool = False,
 ) -> dict:
-    """
-    Pipeline utama:
-      Step 1  : Resolve file (download jika remote)
-      Step 2.1: Layer 1 dedup — cek file_hash sebelum OCR
-      Step 3  : OCR / extract text
-      Step 4  : Layer 2 dedup — cek content_hash setelah OCR
-      Step 5  : Chunking (xlsx -> chunk_xlsx, lainnya -> semantic_chunk)
-      Step 6  : Batch embedding
-      Step 7  : Upsert ke Qdrant
-      cleanup : Hapus file temp via try/finally
-
-    Returns:
-        {"status": "ok|duplicate|reactivated|error", "total_chunks": int, "message": str}
-    """
     logger.info(f"[WORKER] ========== START task={task_id} doc_id={doc_id} ==========")
 
     local_file_path = None
     is_temp_file = False
 
+    def progress_callback(stage: str, message: str, **extra) -> None:
+        logger.info(f"[PROGRESS] task={task_id} stage={stage} | {message}")
+        emit_progress(stage, message, task_id=task_id, doc_id=doc_id, **extra)
+
     try:
-        # --- STEP 1: Resolve file ---
+        progress_callback("starting", "Pipeline dokumen dimulai.")
+
         try:
-            local_file_path, is_temp_file = _resolve_file(file_url, doc_id, filename)
+            local_file_path, is_temp_file = _resolve_file(
+                file_url,
+                doc_id,
+                filename,
+                progress_callback=progress_callback,
+            )
         except (FileNotFoundError, PermissionError) as e:
             logger.error(f"[WORKER] File error: {e}")
             return {"status": "error", "message": str(e)}
@@ -342,7 +435,6 @@ def process_document(
             logger.error(f"[WORKER] IO error: {e}")
             return {"status": "error", "message": str(e)}
 
-        # Tentukan document_filename (untuk payload)
         if filename:
             doc_ext = os.path.splitext(local_file_path)[1]
             user_ext = os.path.splitext(filename)[1]
@@ -352,7 +444,6 @@ def process_document(
 
         file_ext = os.path.splitext(local_file_path)[1].lower()
 
-        # --- STEP 1.5: Hitung file_hash ---
         try:
             file_hash = calculate_file_hash(local_file_path)
             logger.info(f"[WORKER] file_hash={file_hash[:16]}...")
@@ -360,76 +451,62 @@ def process_document(
             logger.warning(f"[WORKER] Gagal hitung file_hash: {e}")
             file_hash = ""
 
-        # --- STEP 2.1: Layer 1 Dedup — file_hash (pre-OCR) ---
-        logger.info(f"[WORKER] Menghubungkan ke Qdrant...")
+        progress_callback("dedup", "Menghubungkan ke Qdrant dan memeriksa duplikasi awal...")
         qdrant = _connect_qdrant()
         _ensure_collection(qdrant, collection_name)
 
         if not skip_dedup_check and file_hash:
             dedup_result = check_duplicate_by_file_hash(qdrant, collection_name, file_hash)
             if dedup_result["exists"]:
+                existing_doc_id = _get_existing_doc_id(dedup_result.get("point")) or doc_id
                 if dedup_result["is_deleted"]:
-                    # Reactivate tanpa re-OCR
-                    logger.info(f"[WORKER] file_hash match (soft-deleted) — reactivating doc_id={doc_id}")
-                    n = reactivate_document(qdrant, collection_name, doc_id)
+                    logger.info(f"[WORKER] file_hash match (soft-deleted) - reactivating doc_id={existing_doc_id}")
+                    n = reactivate_document(qdrant, collection_name, existing_doc_id)
                     return {"status": "reactivated", "total_chunks": n, "message": ""}
-                else:
-                    # Konten identik sudah aktif
-                    logger.info(f"[WORKER] file_hash match (aktif) — duplicate, skip OCR")
-                    return {"status": "duplicate", "total_chunks": 0, "message": ""}
+                logger.info("[WORKER] file_hash match (aktif) - duplicate, skip OCR")
+                return {"status": "duplicate", "total_chunks": 0, "message": ""}
 
-        # --- STEP 3: Load model + OCR ---
-        logger.info(f"[WORKER] Loading embedding model...")
-        model = SentenceTransformer(config.EMBEDDING_MODEL_PATH_LARGE)
-
-        logger.info(f"[WORKER] Mengekstrak teks dari {local_file_path}...")
-        text = extract_text_from_file(local_file_path, lang=lang)
+        progress_callback("extracting", "Mengekstrak teks dokumen...")
+        extracted_pages = extract_text_from_file(
+            local_file_path,
+            lang=lang,
+            return_pages=True,
+            progress_callback=progress_callback,
+        )
+        text = "\n\n".join(
+            page_text for _, page_text in sorted(extracted_pages.items(), key=lambda x: x[0]) if page_text
+        ).strip()
 
         if not text or len(text.strip()) < 50:
             return {"status": "error", "message": "Tidak ada teks yang berhasil diekstrak atau konten terlalu pendek."}
 
         logger.info(f"[WORKER] Ekstraksi selesai: {len(text)} karakter")
-
-        # Hitung content_hash
         content_hash = calculate_content_hash(text)
 
-        # --- STEP 4: Layer 2 Dedup — content_hash (post-OCR) ---
         if not skip_dedup_check:
+            progress_callback("dedup", "Memeriksa duplikasi berdasarkan konten hasil ekstraksi...")
             content_dedup = check_duplicate_by_content_hash(qdrant, collection_name, content_hash)
             if content_dedup["exists"]:
+                existing_doc_id = _get_existing_doc_id(content_dedup.get("point")) or doc_id
                 if content_dedup["is_deleted"]:
-                    logger.info(f"[WORKER] content_hash match (soft-deleted) — reactivating")
-                    n = reactivate_document(qdrant, collection_name, doc_id)
+                    logger.info(f"[WORKER] content_hash match (soft-deleted) - reactivating doc_id={existing_doc_id}")
+                    n = reactivate_document(qdrant, collection_name, existing_doc_id)
                     return {"status": "reactivated", "total_chunks": n, "message": ""}
-                else:
-                    logger.info(f"[WORKER] content_hash match (aktif) — duplicate")
-                    return {"status": "duplicate", "total_chunks": 0, "message": ""}
+                logger.info("[WORKER] content_hash match (aktif) - duplicate")
+                return {"status": "duplicate", "total_chunks": 0, "message": ""}
 
-        # --- STEP 5: Chunking ---
-        logger.info(f"[WORKER] Chunking (ext={file_ext})...")
-        if file_ext in ['.xlsx', '.xls']:
-            rows = _extract_xlsx_rows(local_file_path)
-            chunks = chunk_xlsx(rows, rows_per_chunk=30, max_size=config.CHUNK_SIZE)
-        else:
-            chunks = semantic_chunk(text, chunk_size=config.CHUNK_SIZE, overlap=config.CHUNK_OVERLAP)
-
-        if not chunks:
+        progress_callback("chunking", f"Chunking dokumen (ext={file_ext})...")
+        chunk_items = _build_chunk_items(file_ext, extracted_pages, local_file_path)
+        if not chunk_items:
             return {"status": "error", "message": "Tidak ada chunk yang berhasil dibuat dari konten dokumen."}
 
-        logger.info(f"[WORKER] {len(chunks)} chunk dibuat")
+        total_chunks = len(chunk_items)
+        logger.info(f"[WORKER] {total_chunks} chunk dibuat")
+        progress_callback("chunking", f"Chunking selesai: {total_chunks} chunk.", total_chunks=total_chunks)
 
-        # --- STEP 6: Batch embedding ---
-        logger.info(f"[WORKER] Embedding {len(chunks)} chunks (batch_size=32)...")
-        texts_with_prefix = [f"passage: {c}" for c in chunks]
-        embeddings = model.encode(
-            texts_with_prefix,
-            batch_size=32,
-            normalize_embeddings=True,
-            show_progress_bar=False
-        )
+        embeddings = _embed_chunks(chunk_items, progress_callback=progress_callback)
 
-        # --- STEP 7: Hapus chunk lama dan upsert ---
-        logger.info(f"[WORKER] Menghapus chunk lama untuk doc_id={doc_id}...")
+        progress_callback("upserting", f"Menghapus chunk lama untuk doc_id={doc_id}...")
         try:
             qdrant.delete(
                 collection_name=collection_name,
@@ -438,57 +515,67 @@ def process_document(
                         must=[
                             qdrant_models.FieldCondition(
                                 key="mysql_id",
-                                match=qdrant_models.MatchValue(value=doc_id)
+                                match=qdrant_models.MatchValue(value=doc_id),
                             )
                         ]
                     )
-                )
+                ),
             )
         except Exception:
-            pass  # Belum ada chunk — tidak masalah
+            pass
 
         now = datetime.utcnow().isoformat()
         points = []
 
-        for i, (chunk_text, embedding) in enumerate(zip(chunks, embeddings)):
+        for i, (chunk_item, embedding) in enumerate(zip(chunk_items, embeddings)):
             point_id = str(uuid.uuid4())
             payload = {
-                "mysql_id":        doc_id,
+                "mysql_id": doc_id,
                 "organization_id": organization_id,
-                "filename":        document_filename,
-                "text":            chunk_text,
-                "page_number":     1,
-                "chunk_index":     i,
-                "total_chunks":    len(chunks),
-                "section":         "",
-                "summary":         "",
-                "file_hash":       file_hash,
-                "content_hash":    content_hash,
-                "is_deleted":      False,
-                "created_at":      now,
-                "updated_at":      now
+                "filename": document_filename,
+                "text": chunk_item["text"],
+                "page_number": chunk_item["page_number"],
+                "chunk_index": i,
+                "total_chunks": total_chunks,
+                "section": "",
+                "summary": "",
+                "file_hash": file_hash,
+                "content_hash": content_hash,
+                "is_deleted": False,
+                "created_at": now,
+                "updated_at": now,
             }
-            points.append(PointStruct(id=point_id, vector=embedding.tolist(), payload=payload))
+            vector = embedding.tolist() if hasattr(embedding, "tolist") else embedding
+            points.append(PointStruct(id=point_id, vector=vector, payload=payload))
 
-            # Batch upsert setiap 50 points
-            if len(points) >= 50:
+            if len(points) >= _UPSERT_BATCH_SIZE:
                 qdrant.upsert(collection_name=collection_name, points=points)
                 points = []
-                logger.info(f"[WORKER] Upserted {i+1}/{len(chunks)} chunks...")
+                progress_callback(
+                    "upserting",
+                    f"Upsert selesai {i + 1}/{total_chunks} chunk.",
+                    processed_chunks=i + 1,
+                    total_chunks=total_chunks,
+                )
 
-        # Final batch
         if points:
             qdrant.upsert(collection_name=collection_name, points=points)
+            progress_callback(
+                "upserting",
+                f"Upsert selesai {total_chunks}/{total_chunks} chunk.",
+                processed_chunks=total_chunks,
+                total_chunks=total_chunks,
+            )
 
-        logger.info(f"[WORKER] ========== DONE task={task_id} chunks={len(chunks)} ==========")
-        return {"status": "ok", "total_chunks": len(chunks), "message": ""}
+        progress_callback("completed", f"Pipeline selesai. {total_chunks} chunk berhasil terindeks.", total_chunks=total_chunks)
+        logger.info(f"[WORKER] ========== DONE task={task_id} chunks={total_chunks} ==========")
+        return {"status": "ok", "total_chunks": total_chunks, "message": ""}
 
     except Exception as e:
         logger.exception(f"[WORKER] Unexpected error task={task_id}: {e}")
         return {"status": "error", "message": f"Kesalahan tidak terduga: {type(e).__name__}"}
 
     finally:
-        # Auto-cleanup file temp
         if is_temp_file and local_file_path and os.path.exists(local_file_path):
             try:
                 os.unlink(local_file_path)
@@ -497,23 +584,17 @@ def process_document(
                 logger.warning(f"[WORKER] Gagal hapus temp file: {e}")
 
 
-# ============================================================
-# Qdrant helpers
-# ============================================================
-
 def _connect_qdrant() -> QdrantClient:
-    """Buat koneksi sinkron ke Qdrant."""
     if config.QDRANT_API_KEY:
         return QdrantClient(
             host=config.QDRANT_HOST,
             port=config.QDRANT_PORT,
-            api_key=config.QDRANT_API_KEY
+            api_key=config.QDRANT_API_KEY,
         )
     return QdrantClient(host=config.QDRANT_HOST, port=config.QDRANT_PORT)
 
 
 def _ensure_collection(qdrant: QdrantClient, collection_name: str):
-    """Buat collection jika belum ada."""
     collections = qdrant.get_collections()
     existing = [c.name for c in collections.collections]
     if collection_name not in existing:
@@ -522,31 +603,22 @@ def _ensure_collection(qdrant: QdrantClient, collection_name: str):
             collection_name=collection_name,
             vectors_config=VectorParams(
                 size=config.EMBEDDING_DIMENSION_LARGE,
-                distance=Distance.COSINE
-            )
+                distance=Distance.COSINE,
+            ),
         )
-        # Index payload fields untuk filter performa
         qdrant.create_payload_index(
             collection_name=collection_name,
             field_name="mysql_id",
-            field_schema=qdrant_models.PayloadSchemaType.KEYWORD
+            field_schema=qdrant_models.PayloadSchemaType.KEYWORD,
         )
         qdrant.create_payload_index(
             collection_name=collection_name,
             field_name="is_deleted",
-            field_schema=qdrant_models.PayloadSchemaType.BOOL
+            field_schema=qdrant_models.PayloadSchemaType.BOOL,
         )
 
 
-# ============================================================
-# Entry point — baca params dari stdin JSON
-# ============================================================
-
 def main():
-    """
-    Entry point subprocess.
-    Menerima JSON params dari stdin, output JSON result ke stdout.
-    """
     try:
         raw = sys.stdin.read()
         params = json.loads(raw)
@@ -555,14 +627,14 @@ def main():
         print(json.dumps(result), flush=True)
         sys.exit(1)
 
-    task_id        = params.get("task_id", "unknown")
-    doc_id         = params.get("doc_id", "")
+    task_id = params.get("task_id", "unknown")
+    doc_id = params.get("doc_id", "")
     organization_id = params.get("organization_id")
-    filename       = params.get("filename")
-    file_url       = params.get("file_url", "")
+    filename = params.get("filename")
+    file_url = params.get("file_url", "")
     collection_name = params.get("collection_name", config.COLLECTION_DOCUMENT)
-    lang           = params.get("lang", "id")
-    skip_dedup     = params.get("skip_dedup_check", False)
+    lang = params.get("lang", "id")
+    skip_dedup = params.get("skip_dedup_check", False)
 
     if not doc_id or not file_url:
         result = {"status": "error", "message": "Parameter doc_id dan file_url wajib diisi."}
@@ -577,7 +649,7 @@ def main():
         file_url=file_url,
         collection_name=collection_name,
         lang=lang,
-        skip_dedup_check=skip_dedup
+        skip_dedup_check=skip_dedup,
     )
 
     print(json.dumps(result), flush=True)

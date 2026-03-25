@@ -89,6 +89,12 @@ class Config:
     OCR_ENGINE = _env("OCR_ENGINE", "paddle")
     OCR_LANG = _env("OCR_LANG", "id")
     OCR_TIMEOUT = _env("OCR_TIMEOUT", 1800, int)  # default 30 menit
+    OCR_STALL_TIMEOUT = _env("OCR_STALL_TIMEOUT", 300, int)
+    OCR_HARD_TIMEOUT = _env("OCR_HARD_TIMEOUT", 21600, int)
+    OCR_QUEUE_LOG_INTERVAL = _env("OCR_QUEUE_LOG_INTERVAL", 30, int)
+    OCR_PDF_DPI = _env("OCR_PDF_DPI", 150, int)
+    OCR_PDF_DPI_RETRY = _env("OCR_PDF_DPI_RETRY", 200, int)
+    OCR_DOWNLOAD_PROGRESS_MB = _env("OCR_DOWNLOAD_PROGRESS_MB", 5, int)
 
     # RAG Configuration
     USE_POST_SUMMARY = _env("USE_POST_SUMMARY", "false", bool)
