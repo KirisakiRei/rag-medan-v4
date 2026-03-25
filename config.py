@@ -132,8 +132,11 @@ class Config:
     WEBHOOK_RETRY_ATTEMPTS = _env("WEBHOOK_RETRY_ATTEMPTS", 3, int)
     
     # Webhook Configuration (shared: document dan web scraping service)
-    DOCUMENT_CALLBACK_URL = _env("DOCUMENT_CALLBACK_URL", "")
-    WEB_CALLBACK_URL = _env("WEB_CALLBACK_URL", "")
+    # Backward-compatible aliases:
+    # - WEB_MANAJEMEN_BASE_URL -> DOCUMENT_CALLBACK_URL
+    # - WEB_MANAJEMEN_CALLBACK_URL -> WEB_CALLBACK_URL
+    DOCUMENT_CALLBACK_URL = _env("DOCUMENT_CALLBACK_URL") or _env("WEB_MANAJEMEN_BASE_URL", "")
+    WEB_CALLBACK_URL = _env("WEB_CALLBACK_URL") or _env("WEB_MANAJEMEN_CALLBACK_URL", "")
     WEB_MANAJEMEN_API_KEY = _env("WEB_MANAJEMEN_API_KEY", "")
     
     # Logging
