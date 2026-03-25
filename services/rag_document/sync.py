@@ -25,6 +25,8 @@ _PROGRESS_PREFIX = "__PROGRESS__"
 task_status: Dict[str, dict] = {}
 task_lock = threading.Lock()
 _ocr_semaphore = threading.BoundedSemaphore(2)
+_callback_state: Dict[str, dict] = {}
+_callback_lock = threading.Lock()
 
 _SYNC_STATUS_MAP = {
     "completed": "synced",
@@ -32,6 +34,21 @@ _SYNC_STATUS_MAP = {
     "timeout": "failed",
     "processing": "syncing",
     "queued": "syncing",
+}
+
+_CALLBACK_STAGE_MAP = {
+    "queued": "queued",
+    "processing": "processing_start",
+    "starting": "processing_start",
+    "downloading": "downloading",
+    "extracting": "extracting",
+    "ocr": "ocr",
+    "chunking": "chunking",
+    "embedding": "embedding",
+    "upserting": "upserting",
+    "completed": "completed",
+    "error": "error",
+    "timeout": "timeout",
 }
 
 
@@ -48,6 +65,7 @@ def _cleanup_old_tasks(max_age_hours: int = 24):
                 pass
         for tid in to_delete:
             del task_status[tid]
+            _clear_callback_state(tid)
     if to_delete:
         logger.info(f"[CLEANUP] Hapus {len(to_delete)} task lama dari memory")
 
@@ -83,6 +101,56 @@ def get_task_status(task_id: str) -> Optional[Dict[str, Any]]:
 def get_all_tasks() -> Dict[str, dict]:
     with task_lock:
         return {"tasks": dict(task_status)}
+
+
+def _normalize_callback_stage(stage: Optional[str], status: str) -> str:
+    mapped = _CALLBACK_STAGE_MAP.get(stage or status)
+    if mapped:
+        return mapped
+    return "processing_start" if status == "processing" else status
+
+
+def _build_callback_message(
+    status: str,
+    callback_stage: str,
+    message: str,
+    total_chunks: Optional[int] = None,
+) -> str:
+    if status == "queued":
+        return "Dokumen sedang antri untuk diproses."
+    if status == "processing":
+        stage_messages = {
+            "processing_start": "Sedang memproses file ke dalam vektor RAG...",
+            "downloading": "Sedang mengunduh file...",
+            "extracting": "Sedang mengekstrak teks dokumen...",
+            "ocr": "Sedang melakukan OCR dokumen...",
+            "chunking": "Sedang memecah dokumen menjadi chunk RAG...",
+            "embedding": "Sedang membuat embedding dokumen...",
+            "upserting": "Sedang menyimpan hasil ke RAG...",
+        }
+        return stage_messages.get(callback_stage, "Sedang memproses file ke dalam vektor RAG...")
+    if status == "completed":
+        if total_chunks is not None:
+            return f"File berhasil disinkronisasi ke RAG. Total chunk: {total_chunks}"
+        return "File berhasil disinkronisasi ke RAG."
+    if status in {"error", "timeout"}:
+        return message or "Gagal memproses file: format tidak didukung atau file korup"
+    return message or "Sedang memproses file ke dalam vektor RAG..."
+
+
+def _should_send_callback(task_id: str, sync_status: str, callback_stage: str) -> bool:
+    with _callback_lock:
+        previous = _callback_state.get(task_id)
+        current = {"sync_status": sync_status, "callback_stage": callback_stage}
+        if previous == current:
+            return False
+        _callback_state[task_id] = current
+        return True
+
+
+def _clear_callback_state(task_id: str) -> None:
+    with _callback_lock:
+        _callback_state.pop(task_id, None)
 
 
 def _send_callback(
@@ -134,6 +202,28 @@ def _send_callback(
     logger.error(f"[CALLBACK] Semua {max_attempts} attempts gagal untuk doc_id={doc_id}")
 
 
+def _update_task_with_optional_callback(
+    task_id: str,
+    doc_id: str,
+    status: str,
+    message: str,
+    total_chunks: Optional[int] = None,
+    callback_stage: Optional[str] = None,
+    send_callback: bool = False,
+):
+    update_task_status(task_id, doc_id, status, message, total_chunks)
+    if not send_callback:
+        return
+
+    sync_status = _SYNC_STATUS_MAP.get(status, "failed")
+    normalized_stage = _normalize_callback_stage(callback_stage, status)
+    if not _should_send_callback(task_id, sync_status, normalized_stage):
+        return
+
+    callback_message = _build_callback_message(status, normalized_stage, message, total_chunks)
+    _send_callback(doc_id, task_id, status, callback_message, total_chunks)
+
+
 def _finalize_task(
     task_id: str,
     doc_id: str,
@@ -141,8 +231,16 @@ def _finalize_task(
     message: str,
     total_chunks: Optional[int] = None,
 ):
-    update_task_status(task_id, doc_id, status, message, total_chunks)
-    _send_callback(doc_id, task_id, status, message, total_chunks)
+    _update_task_with_optional_callback(
+        task_id,
+        doc_id,
+        status,
+        message,
+        total_chunks=total_chunks,
+        callback_stage=status,
+        send_callback=True,
+    )
+    _clear_callback_state(task_id)
 
 
 def _parse_progress_line(line: str) -> Optional[dict]:
@@ -184,10 +282,19 @@ def _consume_worker_stderr(
         progress = _parse_progress_line(line)
         if progress:
             state["last_progress_at"] = time.time()
+            progress_stage = progress.get("stage") or "processing"
             state["last_progress_message"] = progress.get("message", "")
             progress_message = progress.get("message") or "Dokumen sedang diproses."
             total_chunks = progress.get("total_chunks")
-            update_task_status(task_id, doc_id, "processing", progress_message, total_chunks=total_chunks)
+            _update_task_with_optional_callback(
+                task_id,
+                doc_id,
+                "processing",
+                progress_message,
+                total_chunks=total_chunks,
+                callback_stage=progress_stage,
+                send_callback=True,
+            )
             logger.info(f"[WORKER-PROGRESS] {task_id} | {progress_message}")
         else:
             logger.info(f"[WORKER-LOG] {task_id} | {line}")
@@ -208,11 +315,13 @@ def _wait_for_worker_slot(task_id: str, doc_id: str) -> None:
         waited_sec = int(time.time() - queue_started_at)
         if waited_sec - last_log_at >= config.OCR_QUEUE_LOG_INTERVAL:
             last_log_at = waited_sec
-            update_task_status(
+            _update_task_with_optional_callback(
                 task_id,
                 doc_id,
                 "queued",
                 f"Dokumen sedang antri untuk diproses. Menunggu slot OCR {waited_sec} detik.",
+                callback_stage="queued",
+                send_callback=True,
             )
             logger.info(f"[SUBPROCESS] {task_id} masih menunggu slot OCR ({waited_sec}s)")
 
@@ -225,17 +334,26 @@ def run_ocr_subprocess(task_id: str, params: dict):
 
     _cleanup_old_tasks()
 
-    _send_callback(
-        doc_id=doc_id,
-        task_id=task_id,
-        status="processing",
-        message="Dokumen sedang diproses oleh OCR pipeline.",
+    _update_task_with_optional_callback(
+        task_id,
+        doc_id,
+        "processing",
+        "Dokumen sedang diproses oleh OCR pipeline.",
+        callback_stage="processing",
+        send_callback=True,
     )
 
     try:
         _wait_for_worker_slot(task_id, doc_id)
         acquired = True
-        update_task_status(task_id, doc_id, "processing", "Subprocess OCR dimulai...")
+        _update_task_with_optional_callback(
+            task_id,
+            doc_id,
+            "processing",
+            "Subprocess OCR dimulai...",
+            callback_stage="processing",
+            send_callback=True,
+        )
 
         worker_script = os.path.abspath(os.path.join(os.path.dirname(__file__), "worker.py"))
         work_dir = os.path.dirname(os.path.dirname(os.path.dirname(worker_script)))
@@ -416,7 +534,14 @@ async def sync_document(
         logger.info(f"[API] File lokal: {file_path} ({file_size_mb:.2f} MB)")
 
     task_id = f"{doc_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-    update_task_status(task_id, doc_id, "queued", "Dokumen sedang antri untuk diproses.")
+    _update_task_with_optional_callback(
+        task_id,
+        doc_id,
+        "queued",
+        "Dokumen sedang antri untuk diproses.",
+        callback_stage="queued",
+        send_callback=True,
+    )
 
     params = {
         "task_id": task_id,
