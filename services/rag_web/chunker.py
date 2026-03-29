@@ -25,6 +25,39 @@ def _normalize_text(text: str) -> str:
     return _WHITESPACE_RE.sub(" ", (text or "").strip())
 
 
+def _extract_accordion_faq_blocks(root: Tag) -> List[Dict[str, Any]]:
+    """Extract FAQ-style blocks from Bootstrap accordion markup."""
+    blocks: List[Dict[str, Any]] = []
+    accordion_items = root.select(".accordion-item")
+    if not accordion_items:
+        return blocks
+
+    block_order = 0
+    for item in accordion_items:
+        question_node = item.select_one(".accordion-button, .accordion-header")
+        answer_node = item.select_one(".accordion-body")
+        question = _normalize_text(question_node.get_text(" ", strip=True)) if question_node else ""
+        answer = _normalize_text(answer_node.get_text(" ", strip=True)) if answer_node else ""
+        if not question or not answer:
+            continue
+
+        text = f"Pertanyaan: {question}\nJawaban: {answer}"
+        blocks.append({
+            "page_number": 1,
+            "text": text,
+            "block_type": "faq_item",
+            "heading_level": None,
+            "heading_text": "FAQ",
+            "heading_path": ["FAQ"],
+            "source_kind": "faq",
+            "block_order": block_order,
+            "metadata": {"faq_question": question},
+        })
+        block_order += 1
+
+    return blocks
+
+
 def _clean_soup(raw_html: str, css_selector: Optional[str] = None) -> Tag:
     soup = BeautifulSoup(raw_html or "", "html.parser")
     for comment in soup.find_all(string=lambda value: isinstance(value, Comment)):
@@ -54,6 +87,10 @@ def extract_html_blocks(
 ) -> List[Dict[str, Any]]:
     """Extract structure-aware blocks from HTML."""
     root = _clean_soup(raw_html, css_selector=css_selector)
+    faq_blocks = _extract_accordion_faq_blocks(root)
+    if faq_blocks:
+        return faq_blocks
+
     blocks: List[Dict[str, Any]] = []
     heading_path: List[str] = []
     order = 0
@@ -145,6 +182,25 @@ def extract_html_blocks(
                     })
                     order += 1
                 continue
+
+            # Fallback for content containers such as div.accordion-body
+            if tag_name == "div":
+                nested_block_exists = child.find(list(_HEADING_TAGS) + list(_BLOCK_TAGS) + ["table"]) is not None
+                text = _normalize_text(child.get_text(" ", strip=True))
+                if text and not nested_block_exists and len(text) > 20:
+                    blocks.append({
+                        "page_number": 1,
+                        "text": text,
+                        "block_type": "paragraph",
+                        "heading_level": None,
+                        "heading_text": heading_path[-1] if heading_path else "",
+                        "heading_path": list(heading_path),
+                        "source_kind": "narrative",
+                        "block_order": order,
+                        "metadata": {"tag_name": tag_name},
+                    })
+                    order += 1
+                    continue
 
             visit(child)
 

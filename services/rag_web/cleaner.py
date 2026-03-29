@@ -117,17 +117,21 @@ class Cleaner:
     
     def _remove_non_content_elements(self, soup: BeautifulSoup) -> None:
         """Remove elements yang kemungkinan bukan content."""
-        for element in soup.find_all(True):
-            classes = element.get("class", [])
-            if classes:
-                class_str = " ".join(classes) if isinstance(classes, list) else classes
-                if self.non_content_pattern.search(class_str):
+        for element in list(soup.find_all(True)):
+            try:
+                classes = element.get("class", [])
+                if classes:
+                    class_str = " ".join(classes) if isinstance(classes, list) else classes
+                    if self.non_content_pattern.search(class_str):
+                        element.decompose()
+                        continue
+
+                element_id = element.get("id", "")
+                if element_id and self.non_content_pattern.search(element_id):
                     element.decompose()
-                    continue
-            
-            element_id = element.get("id", "")
-            if element_id and self.non_content_pattern.search(element_id):
-                element.decompose()
+            except Exception:
+                # Some descendants can become detached after parent decompose; skip safely.
+                continue
     
     def _extract_main_content(self, soup: BeautifulSoup) -> BeautifulSoup:
         """Extract main content area dengan fallback bertingkat."""
