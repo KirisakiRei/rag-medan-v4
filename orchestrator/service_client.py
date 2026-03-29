@@ -38,18 +38,33 @@ async def call_service(
     """Call internal service endpoint."""
     global http_client
     url = f"{service_url}{endpoint}"
+    method = method.upper()
     
     try:
         if method == "POST":
             response = await http_client.post(url, json=data, timeout=timeout)
+        elif method == "PUT":
+            response = await http_client.put(url, json=data, timeout=timeout)
         elif method == "GET":
             response = await http_client.get(url, timeout=timeout)
         elif method == "DELETE":
             response = await http_client.request("DELETE", url, json=data, timeout=timeout)
         else:
             raise ValueError(f"Unsupported method: {method}")
-        
-        return response.json()
+
+        try:
+            return response.json()
+        except ValueError:
+            body_preview = (response.text or "").strip()
+            logger.error(
+                f"[SERVICE] Non-JSON response from {url} "
+                f"(status={response.status_code}): {body_preview[:300]}"
+            )
+            return {
+                "status": "error",
+                "error": f"Invalid response from service (HTTP {response.status_code})",
+                "raw_response": body_preview[:300],
+            }
         
     except httpx.TimeoutException:
         logger.error(f"[SERVICE] Timeout calling {url}")

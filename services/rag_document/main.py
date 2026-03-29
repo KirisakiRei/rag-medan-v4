@@ -207,6 +207,11 @@ async def init_qdrant():
     except Exception as e:
         logger.error(f"Qdrant init error: {e}")
     
+    # Wire Qdrant-dependent modules immediately so delete/search paths are ready
+    # even before the lazy embedding model is first loaded.
+    search_module.set_instances(_model, qdrant)
+    delete_module.set_instances(qdrant)
+
     logger.info(f"Qdrant connected: {config.QDRANT_HOST}:{config.QDRANT_PORT}")
 
 
@@ -214,9 +219,7 @@ async def init_qdrant():
 async def lifespan(app: FastAPI):
     """Application lifespan — model is lazy loaded on first request."""
     await init_qdrant()
-    
-    delete_module.set_instances(qdrant)
-    
+
     idle_task = asyncio.create_task(_idle_unload_loop())
     
     logger.info(f"RAG Document Service Started on port {config.DOCUMENT_SERVICE_PORT}")
