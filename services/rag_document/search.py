@@ -27,6 +27,58 @@ def set_instances(embedding_model: SentenceTransformer, qdrant_client: AsyncQdra
     qdrant = qdrant_client
 
 
+def _extract_query_points(qdrant_hits: Any) -> List[Any]:
+    """Normalize Qdrant query_points response across client versions."""
+    if qdrant_hits is None:
+        return []
+
+    points = getattr(qdrant_hits, "points", None)
+    if points is not None:
+        return list(points)
+
+    result = getattr(qdrant_hits, "result", None)
+    if isinstance(result, list):
+        return result
+    if isinstance(result, dict):
+        nested_points = result.get("points")
+        if isinstance(nested_points, list):
+            return nested_points
+        return []
+
+    if isinstance(qdrant_hits, dict):
+        direct_points = qdrant_hits.get("points")
+        if isinstance(direct_points, list):
+            return direct_points
+        nested_result = qdrant_hits.get("result")
+        if isinstance(nested_result, list):
+            return nested_result
+        if isinstance(nested_result, dict):
+            nested_points = nested_result.get("points")
+            if isinstance(nested_points, list):
+                return nested_points
+        return []
+
+    if isinstance(qdrant_hits, list):
+        return qdrant_hits
+
+    return []
+
+
+def _extract_payload_and_score(point: Any) -> tuple[Dict[str, Any], float]:
+    """Normalize point payload/score across object and dict responses."""
+    if isinstance(point, tuple) and point:
+        point = point[0]
+
+    if isinstance(point, dict):
+        payload = point.get("payload") or {}
+        score = point.get("score", 0.0)
+        return dict(payload), float(score or 0.0)
+
+    payload = getattr(point, "payload", {}) or {}
+    score = getattr(point, "score", 0.0)
+    return dict(payload), float(score or 0.0)
+
+
 async def _retrieve_payloads_by_ids(point_ids: List[str]) -> Dict[str, Dict[str, Any]]:
     valid_ids = [point_id for point_id in point_ids if point_id]
     if not valid_ids:
@@ -94,13 +146,13 @@ async def search_document_bank(
             limit=limit
         )
 
-        result_points = getattr(qdrant_hits, "points", None) or getattr(qdrant_hits, "result", None) or qdrant_hits
+        result_points = _extract_query_points(qdrant_hits)
         search_results = []
 
         for hit in result_points:
-            point = hit[0] if isinstance(hit, tuple) else hit
-            payload = getattr(point, "payload", {}) or point.get("payload", {})
-            score = getattr(point, "score", 0.0)
+            payload, score = _extract_payload_and_score(hit)
+            if not payload:
+                continue
 
             expanded_text = await _expand_document_context(payload)
             search_results.append({
@@ -197,7 +249,7 @@ async def search_document_unified(
         )
         qdrant_duration = time.time() - qdrant_start
 
-        result_points = getattr(qdrant_hits, "points", None) or getattr(qdrant_hits, "result", None) or qdrant_hits
+        result_points = _extract_query_points(qdrant_hits)
 
         if not result_points:
             total_duration = time.time() - start_time
@@ -226,9 +278,9 @@ async def search_document_unified(
         scored_results = []
         
         for hit in result_points:
-            result_item = hit[0] if isinstance(hit, tuple) else hit
-            payload = getattr(result_item, "payload", {}) or result_item.get("payload", {})
-            score = float(getattr(result_item, "score", 0.0))
+            payload, score = _extract_payload_and_score(hit)
+            if not payload:
+                continue
             document_text = await _expand_document_context(payload)
             
             if score >= 0.4 and document_text:
