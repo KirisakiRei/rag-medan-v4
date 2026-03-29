@@ -5,6 +5,7 @@ import sys
 import logging
 import threading
 import time
+import uuid
 from datetime import datetime
 from typing import Dict, Any, List, Optional
 
@@ -96,6 +97,11 @@ def _normalize_optional_text(value: Optional[str]) -> Optional[str]:
     return normalized or None
 
 
+def _state_point_id(web_bank_id: str) -> str:
+    """Map external web_bank_id to a valid deterministic Qdrant point ID."""
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"web-state:{web_bank_id}"))
+
+
 def _chunk_filter(web_bank_id: str, include_deleted: bool = False) -> qdrant_models.Filter:
     conditions = [
         qdrant_models.FieldCondition(
@@ -126,10 +132,26 @@ async def get_web_state(web_bank_id: str) -> Optional[Dict[str, Any]]:
     """Get persisted web scraping state for a web bank."""
     points = await qdrant.retrieve(
         collection_name=config.COLLECTION_WEB_STATE,
-        ids=[web_bank_id],
+        ids=[_state_point_id(web_bank_id)],
         with_payload=True,
         with_vectors=False,
     )
+    if not points:
+        results, _ = await qdrant.scroll(
+            collection_name=config.COLLECTION_WEB_STATE,
+            scroll_filter=qdrant_models.Filter(
+                must=[
+                    qdrant_models.FieldCondition(
+                        key="web_bank_id",
+                        match=qdrant_models.MatchValue(value=web_bank_id),
+                    )
+                ]
+            ),
+            limit=1,
+            with_payload=True,
+            with_vectors=False,
+        )
+        points = results
     if not points:
         return None
     return dict(points[0].payload or {})
@@ -149,7 +171,7 @@ async def upsert_web_state(web_bank_id: str, updates: Dict[str, Any]) -> Dict[st
 
     await qdrant.upsert(
         collection_name=config.COLLECTION_WEB_STATE,
-        points=[PointStruct(id=web_bank_id, vector=_STATE_VECTOR, payload=payload)],
+        points=[PointStruct(id=_state_point_id(web_bank_id), vector=_STATE_VECTOR, payload=payload)],
     )
     return payload
 
