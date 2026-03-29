@@ -18,7 +18,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 from config import config
 from services.rag_document.chunker import ChunkItem
-from services.rag_web.scraper import scraper
+from services.rag_web.scraper import scraper, WebScrapeError
 from services.rag_web.cleaner import cleaner
 from services.rag_web import chunker as web_chunker
 from shared.utils import encode_texts
@@ -100,6 +100,63 @@ def _normalize_optional_text(value: Optional[str]) -> Optional[str]:
 def _state_point_id(web_bank_id: str) -> str:
     """Map external web_bank_id to a valid deterministic Qdrant point ID."""
     return str(uuid.uuid5(uuid.NAMESPACE_URL, f"web-state:{web_bank_id}"))
+
+
+def _classify_processing_error(
+    exc: Exception,
+    *,
+    current_stage: str,
+    css_selector: Optional[str] = None,
+) -> Dict[str, str]:
+    """Classify scrape failures into target-web vs system-processing categories."""
+    if isinstance(exc, WebScrapeError):
+        prefix = (
+            "Gagal mengakses target web"
+            if exc.source == "target_web"
+            else "Gagal pada sistem scraping RAG"
+        )
+        return {
+            "error_source": exc.source,
+            "error_code": exc.code,
+            "user_message": f"{prefix}: {exc.user_message}",
+            "detail_message": exc.detail,
+        }
+
+    error_text = (str(exc) or "").strip()
+    lowered = error_text.lower()
+
+    if "konten terlalu pendek atau kosong setelah cleaning" in lowered:
+        hint = " Periksa URL target atau CSS selector." if css_selector else ""
+        return {
+            "error_source": "target_web",
+            "error_code": "content_empty_after_cleaning",
+            "user_message": (
+                "Gagal mengambil konten yang cukup dari halaman target setelah proses cleaning."
+                f"{hint}"
+            ),
+            "detail_message": error_text,
+        }
+
+    if "tidak ada chunk yang berhasil dibuat" in lowered:
+        hint = " Coba ganti CSS selector atau gunakan halaman yang lebih spesifik." if css_selector else ""
+        return {
+            "error_source": "target_web",
+            "error_code": "chunk_extraction_failed",
+            "user_message": (
+                "Konten berhasil diambil, tetapi struktur halaman tidak dapat diubah menjadi chunk RAG."
+                f"{hint}"
+            ),
+            "detail_message": error_text,
+        }
+
+    return {
+        "error_source": "rag_system",
+        "error_code": "internal_processing_error",
+        "user_message": (
+            f"Terjadi kesalahan internal pada tahap {current_stage} saat memproses hasil scraping."
+        ),
+        "detail_message": error_text or current_stage,
+    }
 
 
 def _chunk_filter(web_bank_id: str, include_deleted: bool = False) -> qdrant_models.Filter:
@@ -482,6 +539,7 @@ async def process_url(
     existing_state = await get_web_state(web_bank_id) or {}
     was_inactive = not bool(existing_state.get("is_active", True))
     started_at = time.monotonic()
+    current_stage = "start"
 
     try:
         logger.info(
@@ -526,6 +584,7 @@ async def process_url(
         try:
             from services.rag_web.rate_limiter import rate_limiter
 
+            current_stage = "rate_limit"
             _log_stage(
                 web_bank_id,
                 "rate_limit",
@@ -537,6 +596,7 @@ async def process_url(
         except Exception as exc:
             logger.warning(f"[SYNC] Rate limiter error (ignored): {exc}")
 
+        current_stage = "fetch"
         _log_stage(
             web_bank_id,
             "fetch",
@@ -565,6 +625,7 @@ async def process_url(
             title=(title or "-")[:80],
         )
 
+        current_stage = "clean"
         _log_stage(
             web_bank_id,
             "clean",
@@ -691,6 +752,7 @@ async def process_url(
             )
             return result
 
+        current_stage = "chunking"
         _log_stage(
             web_bank_id,
             "chunking",
@@ -714,6 +776,7 @@ async def process_url(
         )
 
         chunk_texts = [chunk.text for chunk in child_chunks]
+        current_stage = "embedding"
         _log_stage(
             web_bank_id,
             "embedding",
@@ -732,6 +795,7 @@ async def process_url(
             embedding_count=len(embeddings),
         )
 
+        current_stage = "cleanup"
         _log_stage(
             web_bank_id,
             "cleanup",
@@ -740,6 +804,7 @@ async def process_url(
             started_at=started_at,
         )
         await hard_delete_by_web_bank_id(web_bank_id)
+        current_stage = "upsert"
         _log_stage(
             web_bank_id,
             "upsert",
@@ -844,11 +909,13 @@ async def process_url(
     except Exception as exc:
         logger.exception(f"[SYNC] Error processing URL web_bank_id={web_bank_id}: {exc}")
         failed_at = _utcnow_iso()
-        error_message = str(exc).strip() or "URL tidak dapat dijangkau"
-        if "timeout" in error_message.lower():
-            error_message = (
-                f"timeout setelah {config.SCRAPING_TIMEOUT} detik atau URL tidak dapat dijangkau"
-            )
+        failure = _classify_processing_error(
+            exc,
+            current_stage=current_stage,
+            css_selector=css_selector,
+        )
+        error_message = failure["user_message"]
+        detail_message = failure["detail_message"]
 
         await upsert_web_state(
             web_bank_id,
@@ -860,8 +927,11 @@ async def process_url(
                 "scrape_interval": scrape_interval,
                 "is_active": is_active,
                 "last_scrape_status": "failed",
-                "last_scrape_message": f"Gagal mengakses halaman web: {error_message}",
+                "last_scrape_message": error_message,
                 "last_scraped_at": failed_at,
+                "last_error_source": failure["error_source"],
+                "last_error_code": failure["error_code"],
+                "last_error_detail": detail_message,
                 "metadata": metadata or existing_state.get("metadata") or {},
             },
         )
@@ -871,6 +941,10 @@ async def process_url(
             "web_bank_id": web_bank_id,
             "url": url,
             "error": error_message,
+            "error_source": failure["error_source"],
+            "error_code": failure["error_code"],
+            "error_detail": detail_message,
+            "failed_stage": current_stage,
         }
         _log_stage(
             web_bank_id,
@@ -880,6 +954,9 @@ async def process_url(
             started_at=started_at,
             level="error",
             error=error_message,
+            error_source=failure["error_source"],
+            error_code=failure["error_code"],
+            failed_stage=current_stage,
         )
         await _send_callback_once(
             sent_callbacks,
