@@ -36,7 +36,7 @@ class Config:
     DEBUG = _env("DEBUG", "false", bool)
     
     # Service Ports (internal communication)
-    ORCHESTRATOR_PORT = _env("ORCHESTRATOR_PORT", 5100, int)
+    ORCHESTRATOR_PORT = _env("ORCHESTRATOR_PORT", 5000, int)
     TEXT_SERVICE_PORT = _env("TEXT_SERVICE_PORT", 5010, int)
     DOCUMENT_SERVICE_PORT = _env("DOCUMENT_SERVICE_PORT", 5011, int)
     WEB_SERVICE_PORT = _env("WEB_SERVICE_PORT", 5012, int)
@@ -54,12 +54,6 @@ class Config:
     EMBEDDING_DIMENSION = _env("EMBEDDING_DIMENSION", 384, int)
     EMBEDDING_DIMENSION_LARGE = _env("EMBEDDING_DIMENSION_LARGE", 1024, int)
     
-    # Aliases for backward compatibility
-    EMB_MODEL_PATH = EMBEDDING_MODEL_PATH
-    EMB_LARGE_PATH = EMBEDDING_MODEL_PATH_LARGE
-    EMB_DIM_SMALL = EMBEDDING_DIMENSION
-    EMB_DIM_LARGE = EMBEDDING_DIMENSION_LARGE
-    
     # Qdrant Configuration
     QDRANT_HOST = _env("QDRANT_HOST", "localhost")
     QDRANT_PORT = _env("QDRANT_PORT", 6333, int)
@@ -69,6 +63,7 @@ class Config:
     COLLECTION_TEXT = _env("COLLECTION_TEXT", "knowledge_bank")
     COLLECTION_DOCUMENT = _env("COLLECTION_DOCUMENT", "document_bank")
     COLLECTION_WEB = _env("COLLECTION_WEB", "web_scraping_bank")
+    COLLECTION_WEB_STATE = _env("COLLECTION_WEB_STATE", "web_scraping_state")
     COLLECTION_USULAN = _env("COLLECTION_USULAN", "usulan_bank")
     
     # LLM Configuration (Gemini)
@@ -114,8 +109,14 @@ class Config:
     RERANK_WEIGHT_WEB = _env("RERANK_WEIGHT_WEB", 0.25, float)
     
     # Chunking Configuration (Document & Web)
-    CHUNK_SIZE = _env("CHUNK_SIZE", 1200, int)
-    CHUNK_OVERLAP = _env("CHUNK_OVERLAP", 150, int)
+    DOC_CHILD_CHUNK_SIZE = _env("DOC_CHILD_CHUNK_SIZE", 420, int)
+    DOC_PARENT_CHUNK_SIZE = _env("DOC_PARENT_CHUNK_SIZE", 1200, int)
+    DOC_CHUNK_OVERLAP = _env("DOC_CHUNK_OVERLAP", 90, int)
+    WEB_CHILD_CHUNK_SIZE = _env("WEB_CHILD_CHUNK_SIZE", 420, int)
+    WEB_PARENT_CHUNK_SIZE = _env("WEB_PARENT_CHUNK_SIZE", 1000, int)
+    ENABLE_SEMANTIC_MERGE = _env("ENABLE_SEMANTIC_MERGE", "true", bool)
+    SEMANTIC_MERGE_SIM_THRESHOLD = _env("SEMANTIC_MERGE_SIM_THRESHOLD", 0.32, float)
+    RETRIEVAL_CONTEXT_EXPANSION = _env("RETRIEVAL_CONTEXT_EXPANSION", "true", bool)
     
     # Web Scraping Configuration
     SCRAPING_TIMEOUT = _env("SCRAPING_TIMEOUT", 30, int)
@@ -168,44 +169,5 @@ class Config:
     LARGE_MODEL_IDLE_TIMEOUT = _env("LARGE_MODEL_IDLE_TIMEOUT", 1800, int)
 
 
-# Singleton instance
+# Canonical configuration instance used across the codebase
 config = Config()
-
-# Legacy CONFIG dict for backward compatibility
-CONFIG = {
-    "api": {
-        "host": config.API_HOST,
-        "port": config.ORCHESTRATOR_PORT
-    },
-    "embeddings": {
-        "model_path": config.EMBEDDING_MODEL_PATH,
-        "model_path_large": config.EMBEDDING_MODEL_PATH_LARGE
-    },
-    "qdrant": {
-        "host": config.QDRANT_HOST,
-        "port": config.QDRANT_PORT
-    },
-    "llm": {
-        "base_url": config.LLM_BASE_URL,
-        "api_key": config.LLM_API_KEY,
-        "model": config.LLM_MODEL,
-        "timeout_sec": config.LLM_TIMEOUT,
-        "provider": config.LLM_PROVIDER
-    },
-    "db": {
-        "host": config.DB_HOST,
-        "port": config.DB_PORT,
-        "database": config.DB_DATABASE,
-        "username": config.DB_USERNAME,
-        "password": config.DB_PASSWORD
-    },
-    "ocr": {
-        "engine": config.OCR_ENGINE,
-        "lang": config.OCR_LANG,
-        "timeout": config.OCR_TIMEOUT
-    },
-    "rag": {
-        "use_post_summary": config.USE_POST_SUMMARY,
-        "post_summary_top_k": config.POST_SUMMARY_TOP_K
-    }
-}

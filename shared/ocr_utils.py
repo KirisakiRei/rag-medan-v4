@@ -357,3 +357,277 @@ def extract_text_from_file(
         return dict(sorted(extracted_pages.items(), key=lambda x: x[0]))
 
     return "\n\n".join(extracted_pages.values()).strip()
+
+
+_HEADING_HINT_RE = re.compile(
+    r"^(bab|bagian|section|pasal|lampiran|judul|ketentuan|persyaratan|prosedur|alur|tahapan)\b",
+    re.IGNORECASE,
+)
+_LIST_HINT_RE = re.compile(r"^(\d+[\.\)]|[-*]|[a-zA-Z][\.\)])\s+")
+
+
+def _is_heading_candidate(text: str) -> bool:
+    cleaned = (text or "").strip()
+    if not cleaned:
+        return False
+    if len(cleaned) > 120:
+        return False
+    if _HEADING_HINT_RE.match(cleaned):
+        return True
+    if cleaned.endswith((".", "?", "!", ";", ":")):
+        return False
+    if cleaned.isupper() and len(cleaned.split()) <= 10:
+        return True
+    words = cleaned.split()
+    titled_words = sum(1 for word in words if word[:1].isupper())
+    return len(words) <= 8 and titled_words == len(words)
+
+
+def _heading_level_from_text(text: str) -> int:
+    lowered = (text or "").strip().lower()
+    if lowered.startswith("bab"):
+        return 1
+    if lowered.startswith("bagian"):
+        return 2
+    if lowered.startswith("pasal"):
+        return 3
+    return 2
+
+
+def _build_plaintext_blocks(
+    text: str,
+    *,
+    page_number: int,
+    source_kind: str,
+    heading_path: Optional[list[str]] = None,
+    block_order_start: int = 0,
+) -> list[dict]:
+    blocks: list[dict] = []
+    active_heading_path = list(heading_path or [])
+    paragraphs = [part.strip() for part in re.split(r"\n\s*\n+", text or "") if part.strip()]
+    block_order = block_order_start
+
+    for paragraph in paragraphs:
+        lines = [line.strip() for line in paragraph.splitlines() if line.strip()]
+        if not lines:
+            continue
+
+        first_line = lines[0]
+        block_type = "paragraph"
+        heading_level = None
+        heading_text = active_heading_path[-1] if active_heading_path else ""
+
+        if _is_heading_candidate(first_line):
+            block_type = "heading"
+            heading_level = _heading_level_from_text(first_line)
+            active_heading_path = active_heading_path[:heading_level - 1] + [first_line]
+            heading_text = first_line
+        elif _LIST_HINT_RE.match(first_line):
+            block_type = "list_item"
+
+        normalized = _clean_page_text(paragraph)
+        if not normalized:
+            continue
+
+        blocks.append({
+            "page_number": page_number,
+            "text": normalized,
+            "block_type": block_type,
+            "heading_level": heading_level,
+            "heading_text": heading_text,
+            "heading_path": list(active_heading_path),
+            "source_kind": source_kind,
+            "block_order": block_order,
+            "metadata": {},
+        })
+        block_order += 1
+
+    return blocks
+
+
+def build_blocks_from_extracted_pages(
+    extracted_pages: Dict[int, str],
+    *,
+    source_kind: str = "ocr",
+) -> list[dict]:
+    """Build structured blocks from already extracted page text."""
+    blocks: list[dict] = []
+    block_order = 0
+    for page_number, page_text in sorted(extracted_pages.items(), key=lambda item: item[0]):
+        page_blocks = _build_plaintext_blocks(
+            page_text,
+            page_number=page_number,
+            source_kind=source_kind,
+            block_order_start=block_order,
+        )
+        blocks.extend(page_blocks)
+        block_order += len(page_blocks)
+    return blocks
+
+
+def _extract_docx_blocks(file_path: str) -> list[dict]:
+    from docx import Document
+
+    blocks: list[dict] = []
+    try:
+        docx_document = Document(file_path)
+    except Exception as e:
+        logger.warning(f"[DOCX] Gagal membuka DOCX untuk block extraction {file_path}: {e}")
+        return blocks
+
+    heading_path: list[str] = []
+    block_order = 0
+    for para in docx_document.paragraphs:
+        text = para.text.strip()
+        if not text:
+            continue
+
+        style_name = (getattr(para.style, "name", "") or "").strip()
+        heading_level = None
+        block_type = "paragraph"
+        heading_text = heading_path[-1] if heading_path else ""
+
+        if style_name.startswith("Heading"):
+            match = re.search(r"(\d+)", style_name)
+            heading_level = int(match.group(1)) if match else 1
+            heading_path = heading_path[:heading_level - 1] + [text]
+            block_type = "heading"
+            heading_text = text
+        elif _LIST_HINT_RE.match(text):
+            block_type = "list_item"
+
+        blocks.append({
+            "page_number": 1,
+            "text": _clean_page_text(text),
+            "block_type": block_type,
+            "heading_level": heading_level,
+            "heading_text": heading_text,
+            "heading_path": list(heading_path),
+            "source_kind": "narrative",
+            "block_order": block_order,
+            "metadata": {"docx_style": style_name},
+        })
+        block_order += 1
+
+    return blocks
+
+
+def _extract_xlsx_blocks(file_path: str) -> list[dict]:
+    import openpyxl
+
+    blocks: list[dict] = []
+    try:
+        workbook = openpyxl.load_workbook(file_path, data_only=True, read_only=True)
+    except Exception as e:
+        logger.warning(f"[XLSX] Gagal membuka XLSX untuk block extraction {file_path}: {e}")
+        return blocks
+
+    block_order = 0
+    for sheet in workbook.worksheets:
+        header_row: list[str] = []
+        row_index = 0
+        blocks.append({
+            "page_number": 1,
+            "text": f"Sheet: {sheet.title}",
+            "block_type": "sheet_header",
+            "heading_level": 1,
+            "heading_text": sheet.title,
+            "heading_path": [sheet.title],
+            "source_kind": "table",
+            "sheet_name": sheet.title,
+            "block_order": block_order,
+            "metadata": {},
+        })
+        block_order += 1
+
+        for row in sheet.iter_rows(values_only=True):
+            row_index += 1
+            cells = [str(cell).strip() if cell is not None else "" for cell in row]
+            if not any(cells):
+                continue
+            if not header_row:
+                header_row = cells
+                blocks.append({
+                    "page_number": 1,
+                    "text": " | ".join(header_row),
+                    "block_type": "sheet_header",
+                    "heading_level": 2,
+                    "heading_text": sheet.title,
+                    "heading_path": [sheet.title],
+                    "source_kind": "table",
+                    "sheet_name": sheet.title,
+                    "row_start": row_index,
+                    "row_end": row_index,
+                    "block_order": block_order,
+                    "metadata": {"header_row": header_row},
+                })
+                block_order += 1
+                continue
+
+            row_text = " | ".join(cells)
+            table_text = " | ".join(header_row) + "\n" + row_text
+            blocks.append({
+                "page_number": 1,
+                "text": table_text,
+                "block_type": "table_row",
+                "heading_text": sheet.title,
+                "heading_path": [sheet.title],
+                "source_kind": "table",
+                "sheet_name": sheet.title,
+                "row_start": row_index,
+                "row_end": row_index,
+                "block_order": block_order,
+                "metadata": {"header_row": header_row},
+            })
+            block_order += 1
+
+    workbook.close()
+    return blocks
+
+
+def extract_blocks_from_file(
+    file_path: str,
+    lang: str = "id",
+    progress_callback: Optional[Callable[..., None]] = None,
+) -> list[dict]:
+    """
+    Extract structured blocks from supported file types.
+
+    This complements `extract_text_from_file` for structure-aware chunking.
+    """
+    file_extension = os.path.splitext(file_path)[1].lower()
+
+    if file_extension == ".pdf":
+        extracted_pages = _extract_pdf_pages(
+            file_path,
+            dpi=config.OCR_PDF_DPI,
+            retry_dpi=config.OCR_PDF_DPI_RETRY,
+            progress_callback=progress_callback,
+        )
+        return build_blocks_from_extracted_pages(extracted_pages, source_kind="ocr")
+
+    if file_extension == ".docx":
+        return _extract_docx_blocks(file_path)
+
+    if file_extension == ".xlsx":
+        return _extract_xlsx_blocks(file_path)
+
+    if file_extension == ".txt":
+        full_text = extract_text_from_file(
+            file_path,
+            lang=lang,
+            return_pages=False,
+            progress_callback=progress_callback,
+        )
+        return _build_plaintext_blocks(full_text, page_number=1, source_kind="narrative")
+
+    if file_extension in [".jpg", ".jpeg", ".png"]:
+        full_text = extract_text_from_file(
+            file_path,
+            lang=lang,
+            return_pages=False,
+            progress_callback=progress_callback,
+        )
+        return _build_plaintext_blocks(full_text, page_number=1, source_kind="ocr")
+
+    raise ValueError(f"Format file {file_extension} belum didukung untuk block extraction.")

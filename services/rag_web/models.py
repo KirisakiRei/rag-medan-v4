@@ -21,41 +21,42 @@ class UnifiedSearchRequest(BaseModel):
 
 class TriggerRequest(BaseModel):
     """Request untuk trigger scraping."""
-    link_id: str = Field(..., description="Unique ID dari link")
+    web_bank_id: str = Field(..., description="Unique ID dari web bank")
+    name: str = Field(..., description="Nama website")
+    opd_id: str = Field(..., description="ID OPD pemilik website")
     url: str = Field(..., description="URL yang akan di-scrape")
-
-    # Content extraction options
-    content_type: str = Field("general", description="Tipe konten: general | article | faq")
     css_selector: Optional[str] = Field(None, description="CSS selector untuk target konten spesifik (contoh: div.berita-isi)")
+    scrape_interval: Optional[int] = Field(None, description="Interval scrape dalam jam")
+    is_active: bool = Field(True, description="Apakah web bank aktif dan searchable")
+    metadata: Optional[dict] = Field(default_factory=dict)
 
-    # JavaScript rendering options
-    use_js_renderer: Optional[bool] = Field(None, description="True=paksa Playwright, False=paksa httpx, None=auto-detect")
-    wait_selector: Optional[str] = Field(None, description="CSS selector yang ditunggu muncul sebelum ambil HTML (hanya untuk JS renderer)")
 
-    # FAQ extraction options
-    faq_question_selector: Optional[str] = Field(None, description="CSS selector untuk elemen pertanyaan FAQ")
-    faq_answer_selector: Optional[str] = Field(None, description="CSS selector untuk elemen jawaban FAQ")
-
-    # Processing control
-    force_rescrape: bool = Field(False, description="Paksa re-scrape meski link_id sudah ada")
-    callback_url: Optional[str] = Field(None, description="Custom callback URL (override global config)")
+class UpdateRequest(BaseModel):
+    """Request untuk update metadata web bank."""
+    web_bank_id: str = Field(..., description="Unique ID dari web bank")
+    name: str = Field(..., description="Nama website")
+    opd_id: str = Field(..., description="ID OPD pemilik website")
+    url: str = Field(..., description="URL website")
+    css_selector: Optional[str] = Field(None, description="CSS selector target konten")
+    scrape_interval: Optional[int] = Field(None, description="Interval scrape dalam jam")
+    is_active: bool = Field(True, description="Apakah web bank aktif dan searchable")
     metadata: Optional[dict] = Field(default_factory=dict)
 
 
 class SyncRequest(BaseModel):
     """Request untuk sync edited content."""
-    link_id: str = Field(..., description="ID link")
+    web_bank_id: str = Field(..., description="ID web bank")
     edited_content: str = Field(..., description="Konten hasil edit")
 
 
 class DeleteRequest(BaseModel):
     """Request untuk delete content."""
-    link_id: str = Field(..., description="ID link yang akan dihapus")
+    web_bank_id: str = Field(..., description="ID web bank yang akan dihapus")
 
 
 class GetContentRequest(BaseModel):
     """Request untuk get content."""
-    link_id: str = Field(..., description="ID link")
+    web_bank_id: str = Field(..., description="ID web bank")
 
 
 # ============== RESPONSE MODELS ==============
@@ -63,7 +64,9 @@ class GetContentRequest(BaseModel):
 class SearchResultItem(BaseModel):
     """Single search result item."""
     id: str
-    link_id: str
+    web_bank_id: str
+    name: str
+    opd_id: str
     url: str
     title: str
     content: str
@@ -85,28 +88,36 @@ class TriggerResponse(BaseModel):
     """Response untuk trigger endpoint."""
     status: str
     message: str
-    link_id: str
+    web_bank_id: str
     job_id: Optional[str] = None
 
 
 class SyncResponse(BaseModel):
     """Response untuk sync endpoint."""
     status: str
-    link_id: str
+    web_bank_id: str
     chunks_count: Optional[int] = None
+
+
+class UpdateResponse(BaseModel):
+    """Response untuk update endpoint."""
+    status: str
+    web_bank_id: str
+    message: str
+    job_id: Optional[str] = None
 
 
 class DeleteResponse(BaseModel):
     """Response untuk delete endpoint."""
     status: str
-    link_id: str
+    web_bank_id: str
     deleted_chunks: Optional[int] = None
 
 
 class ContentResponse(BaseModel):
     """Response untuk get content endpoint."""
     status: str
-    link_id: str
+    web_bank_id: str
     url: str
     title: str
     clean_content: str

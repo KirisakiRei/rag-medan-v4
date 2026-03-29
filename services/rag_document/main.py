@@ -32,6 +32,73 @@ _last_model_used: float = 0.0
 qdrant: AsyncQdrantClient = None
 
 
+async def _ensure_payload_index(collection_name: str, field_name: str, field_schema) -> None:
+    try:
+        await qdrant.create_payload_index(
+            collection_name=collection_name,
+            field_name=field_name,
+            field_schema=field_schema
+        )
+    except Exception:
+        pass
+
+
+async def _backfill_is_active(collection_name: str) -> None:
+    """Backfill missing is_active payload for legacy document points."""
+    try:
+        offset = None
+        updated_active = 0
+        updated_inactive = 0
+        while True:
+            points, next_offset = await qdrant.scroll(
+                collection_name=collection_name,
+                limit=256,
+                offset=offset,
+                with_payload=True,
+                with_vectors=False,
+            )
+            if not points:
+                break
+
+            active_ids = []
+            inactive_ids = []
+            for point in points:
+                payload = dict(point.payload or {})
+                if "is_active" in payload:
+                    continue
+                if payload.get("is_deleted", False):
+                    inactive_ids.append(point.id)
+                else:
+                    active_ids.append(point.id)
+
+            if active_ids:
+                await qdrant.set_payload(
+                    collection_name=collection_name,
+                    payload={"is_active": True},
+                    points=active_ids,
+                )
+                updated_active += len(active_ids)
+            if inactive_ids:
+                await qdrant.set_payload(
+                    collection_name=collection_name,
+                    payload={"is_active": False},
+                    points=inactive_ids,
+                )
+                updated_inactive += len(inactive_ids)
+
+            if next_offset is None:
+                break
+            offset = next_offset
+
+        if updated_active or updated_inactive:
+            logger.info(
+                f"Backfilled is_active on {collection_name}: "
+                f"active={updated_active}, inactive={updated_inactive}"
+            )
+    except Exception as exc:
+        logger.warning(f"Backfill is_active skipped for {collection_name}: {exc}")
+
+
 async def get_model() -> SentenceTransformer:
     """
     Lazy load large embedding model with thundering herd protection.
@@ -110,18 +177,33 @@ async def init_qdrant():
                     distance=Distance.COSINE
                 )
             )
-            
-            # Create indexes
-            await qdrant.create_payload_index(
-                collection_name=config.COLLECTION_DOCUMENT,
-                field_name="doc_id",
-                field_schema=qdrant_models.PayloadSchemaType.KEYWORD
-            )
-            await qdrant.create_payload_index(
-                collection_name=config.COLLECTION_DOCUMENT,
-                field_name="is_deleted",
-                field_schema=qdrant_models.PayloadSchemaType.BOOL
-            )
+
+        await _ensure_payload_index(
+            config.COLLECTION_DOCUMENT,
+            "mysql_id",
+            qdrant_models.PayloadSchemaType.KEYWORD
+        )
+        await _ensure_payload_index(
+            config.COLLECTION_DOCUMENT,
+            "is_deleted",
+            qdrant_models.PayloadSchemaType.BOOL
+        )
+        await _ensure_payload_index(
+            config.COLLECTION_DOCUMENT,
+            "is_active",
+            qdrant_models.PayloadSchemaType.BOOL
+        )
+        await _ensure_payload_index(
+            config.COLLECTION_DOCUMENT,
+            "chunk_level",
+            qdrant_models.PayloadSchemaType.KEYWORD
+        )
+        await _ensure_payload_index(
+            config.COLLECTION_DOCUMENT,
+            "parent_chunk_id",
+            qdrant_models.PayloadSchemaType.KEYWORD
+        )
+        await _backfill_is_active(config.COLLECTION_DOCUMENT)
     except Exception as e:
         logger.error(f"Qdrant init error: {e}")
     
@@ -226,13 +308,17 @@ async def internal_search_unified(request: UnifiedSearchRequest):
 @app.post("/internal/sync")
 async def internal_sync(request: SyncRequest):
     """Internal sync endpoint - trigger OCR worker."""
-    logger.info(f"[SYNC] doc_id={request.doc_id} | org={request.organization_id} | filename={request.filename}")
+    logger.info(
+        f"[SYNC] doc_id={request.doc_id} | org={request.organization_id} | "
+        f"filename={request.filename} | is_active={request.is_active}"
+    )
 
     result = await sync_module.sync_document(
         doc_id=request.doc_id,
         file_url=request.file_url,
         organization_id=request.organization_id,
-        filename=request.filename
+        filename=request.filename,
+        is_active=request.is_active,
     )
 
     return JSONResponse(status_code=200, content=result)

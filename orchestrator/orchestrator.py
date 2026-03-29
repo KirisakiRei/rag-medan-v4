@@ -22,7 +22,7 @@ from shared.logging_config import setup_logging
 from orchestrator.models import (
     SearchRequest, SyncRequest, DocSearchRequest, DocSyncRequest, 
     DocDeleteRequest, UsulanSyncRequest, UsulanSearchRequest,
-    WebTriggerRequest, WebSyncRequest, WebDeleteRequest, WebSearchRequest
+    WebTriggerRequest, WebUpdateRequest, WebDeleteRequest, WebSearchRequest
 )
 from orchestrator.service_client import call_service, set_client, create_optimized_client
 from orchestrator.search_handler import unified_search
@@ -190,7 +190,11 @@ async def doc_search(request: DocSearchRequest):
 @app.post("/api/doc-sync")
 async def doc_sync(request: DocSyncRequest):
     """Sync document (trigger OCR)."""
-    logger.info(f"[DOC-SYNC] doc_id={request.doc_id}, opd={request.opd_name}")
+    organization_id = request.organization_id or request.opd_name
+    logger.info(
+        f"[DOC-SYNC] doc_id={request.doc_id}, organization_id={organization_id}, "
+        f"filename={request.filename}, is_active={request.is_active}"
+    )
     
     result = await call_service(
         config.DOCUMENT_SERVICE_URL,
@@ -198,8 +202,10 @@ async def doc_sync(request: DocSyncRequest):
         "POST",
         {
             "doc_id": request.doc_id,
-            "opd_name": request.opd_name,
-            "file_url": request.file_url
+            "organization_id": organization_id,
+            "filename": request.filename,
+            "file_url": request.file_url,
+            "is_active": request.is_active,
         }
     )
     
@@ -291,16 +297,20 @@ async def search_usulan(request: UsulanSearchRequest):
 @app.post("/api/web-trigger")
 async def trigger_web_scraping(request: WebTriggerRequest):
     """Trigger web scraping."""
-    logger.info(f"[WEB-TRIGGER] link_id={request.link_id}, url={request.url}")
+    logger.info(f"[WEB-TRIGGER] web_bank_id={request.web_bank_id}, url={request.url}")
     
     result = await call_service(
         config.WEB_SERVICE_URL,
         "/internal/trigger",
         "POST",
         {
-            "link_id": request.link_id,
+            "web_bank_id": request.web_bank_id,
+            "name": request.name,
+            "opd_id": request.opd_id,
             "url": request.url,
-            "callback_url": request.callback_url,
+            "css_selector": request.css_selector,
+            "scrape_interval": request.scrape_interval,
+            "is_active": request.is_active,
             "metadata": request.metadata
         }
     )
@@ -308,31 +318,40 @@ async def trigger_web_scraping(request: WebTriggerRequest):
     return result
 
 
-@app.post("/api/web-sync")
-async def sync_web_content(request: WebSyncRequest):
-    """Sync edited web content."""
-    logger.info(f"[WEB-SYNC] link_id={request.link_id}")
-    
+@app.put("/api/web-update")
+async def update_web_content(request: WebUpdateRequest):
+    """Update web bank metadata and optionally rescrape if source settings changed."""
+    logger.info(f"[WEB-UPDATE] web_bank_id={request.web_bank_id}, url={request.url}")
+
     result = await call_service(
         config.WEB_SERVICE_URL,
-        "/internal/sync",
-        "POST",
-        {"link_id": request.link_id, "edited_content": request.edited_content}
+        "/internal/update",
+        "PUT",
+        {
+            "web_bank_id": request.web_bank_id,
+            "name": request.name,
+            "opd_id": request.opd_id,
+            "url": request.url,
+            "css_selector": request.css_selector,
+            "scrape_interval": request.scrape_interval,
+            "is_active": request.is_active,
+            "metadata": request.metadata,
+        }
     )
-    
+
     return result
 
 
 @app.delete("/api/web-delete")
 async def delete_web_content(request: WebDeleteRequest):
-    """Delete web content."""
-    logger.info(f"[WEB-DELETE] link_id={request.link_id}")
+    """Soft delete web content."""
+    logger.info(f"[WEB-DELETE] web_bank_id={request.web_bank_id}")
     
     result = await call_service(
         config.WEB_SERVICE_URL,
         "/internal/delete",
         "DELETE",
-        {"link_id": request.link_id}
+        {"web_bank_id": request.web_bank_id}
     )
     
     return result

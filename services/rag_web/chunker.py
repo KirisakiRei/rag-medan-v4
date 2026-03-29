@@ -1,223 +1,236 @@
 """
 RAG Web Service - Chunker Module
-Text chunking untuk web content
+Structure-aware chunking for HTML pages and FAQ content.
 """
-import re
+from __future__ import annotations
+
 import logging
-from typing import List
-from dataclasses import dataclass, field
+import re
+from typing import Any, Dict, List, Optional
+
+from bs4 import BeautifulSoup, Comment, NavigableString, Tag
+
+from config import config
+from services.rag_document.chunker import ChunkItem, structure_chunk_document
 
 logger = logging.getLogger("rag_web.chunker")
 
-
-@dataclass
-class Chunk:
-    """Chunk data class."""
-    content: str
-    index: int
-    start_char: int
-    end_char: int
-    token_count: int
-    metadata: dict = field(default_factory=dict)
+_HEADING_TAGS = {"h1": 1, "h2": 2, "h3": 3, "h4": 4, "h5": 5, "h6": 6}
+_BLOCK_TAGS = {"p", "li", "blockquote", "pre", "td", "th"}
+_SKIP_TAGS = {"script", "style", "noscript", "iframe", "svg", "canvas", "form", "button"}
+_WHITESPACE_RE = re.compile(r"\s+")
 
 
-class Chunker:
-    """Text chunker untuk web content."""
-    
-    PARAGRAPH_PATTERN = re.compile(r"\n\s*\n")
-    SENTENCE_PATTERN = re.compile(r"(?<=[.!?])\s+")
-    
-    def __init__(self, chunk_size: int = 512, chunk_overlap: int = 50):
-        self.chunk_size = chunk_size
-        self.chunk_overlap = chunk_overlap
-    
-    def chunk(self, text: str, url: str = "") -> List[Chunk]:
-        """Chunk text menjadi bagian kecil."""
-        if not text or not text.strip():
-            return []
-        
-        text = text.strip()
-        
-        # Split by paragraphs
-        paragraphs = self.PARAGRAPH_PATTERN.split(text)
-        paragraphs = [p.strip() for p in paragraphs if p.strip()]
-        
-        chunks: List[Chunk] = []
-        current_chunk = ""
-        current_start = 0
-        char_position = 0
-        
-        for para in paragraphs:
-            para_tokens = self._estimate_tokens(para)
-            
-            # Jika paragraph terlalu besar, split lagi
-            if para_tokens > self.chunk_size:
-                # Flush current chunk
-                if current_chunk:
-                    chunks.append(self._create_chunk(
-                        current_chunk, len(chunks), current_start, char_position
-                    ))
-                    current_chunk = ""
-                
-                # Split paragraph yang besar
-                sub_chunks = self._split_large_paragraph(para)
-                for sub_chunk in sub_chunks:
-                    chunks.append(self._create_chunk(
-                        sub_chunk, len(chunks), char_position, char_position + len(sub_chunk)
-                    ))
-                    char_position += len(sub_chunk) + 2
-            else:
-                # Try to combine dengan current chunk
-                combined = current_chunk + "\n\n" + para if current_chunk else para
-                combined_tokens = self._estimate_tokens(combined)
-                
-                if combined_tokens <= self.chunk_size:
-                    if not current_chunk:
-                        current_start = char_position
-                    current_chunk = combined
-                else:
-                    # Flush current chunk dan start baru
-                    if current_chunk:
-                        chunks.append(self._create_chunk(
-                            current_chunk, len(chunks), current_start, char_position
-                        ))
-                    current_chunk = para
-                    current_start = char_position
-            
-            char_position += len(para) + 2
-        
-        # Flush remaining
-        if current_chunk:
-            chunks.append(self._create_chunk(
-                current_chunk, len(chunks), current_start, char_position
-            ))
-        
-        logger.info(f"[CHUNKER] Created {len(chunks)} chunks")
-        return chunks
-    
-    def _split_large_paragraph(self, paragraph: str) -> List[str]:
-        """Split paragraph besar berdasarkan sentence."""
-        sentences = self.SENTENCE_PATTERN.split(paragraph)
-        sentences = [s.strip() for s in sentences if s.strip()]
-        
-        chunks = []
-        current = ""
-        
-        for sentence in sentences:
-            combined = current + " " + sentence if current else sentence
-            if self._estimate_tokens(combined) <= self.chunk_size:
-                current = combined
-            else:
-                if current:
-                    chunks.append(current)
-                current = sentence if self._estimate_tokens(sentence) <= self.chunk_size else ""
-        
-        if current:
-            chunks.append(current)
-        
-        return chunks
-    
-    def _estimate_tokens(self, text: str) -> int:
-        """Estimate jumlah tokens."""
-        if not text:
-            return 0
-        return max(len(text.split()), len(text) // 4)
-    
-    def _create_chunk(self, content: str, index: int, start_char: int, end_char: int) -> Chunk:
-        """Create Chunk object."""
-        return Chunk(
-            content=content.strip(),
-            index=index,
-            start_char=start_char,
-            end_char=end_char,
-            token_count=self._estimate_tokens(content)
-        )
-
-    def chunk_faq(self, pairs: list, url: str = "") -> List[Chunk]:
-        """Chunk FAQ pairs. Format: 'T: {pertanyaan}\nJ: {jawaban}'. Jawaban panjang dipecah per sub-chunk."""
-        if not pairs:
-            return []
-
-        chunks: List[Chunk] = []
-        char_position = 0
-
-        for q_text, a_text in pairs:
-            q_text = q_text.strip()
-            a_text = a_text.strip()
-
-            full_content = f"T: {q_text}\nJ: {a_text}"
-            token_count = self._estimate_tokens(full_content)
-
-            if token_count <= self.chunk_size:
-                # Pair muat dalam satu chunk
-                chunk = Chunk(
-                    content=full_content,
-                    index=len(chunks),
-                    start_char=char_position,
-                    end_char=char_position + len(full_content),
-                    token_count=token_count,
-                    metadata={
-                        "content_type": "faq",
-                        "faq_question": q_text,
-                    }
-                )
-                chunks.append(chunk)
-                char_position += len(full_content) + 2
-            else:
-                # Jawaban terlalu panjang — pecah jawaban, prefix pertanyaan di tiap sub-chunk
-                a_sentences = self.SENTENCE_PATTERN.split(a_text)
-                a_sentences = [s.strip() for s in a_sentences if s.strip()]
-
-                current_a = ""
-                sub_idx = 0
-
-                for sentence in a_sentences:
-                    combined = current_a + " " + sentence if current_a else sentence
-                    prefix = f"T: {q_text}\nJ: "
-                    combined_full = prefix + combined
-                    if self._estimate_tokens(combined_full) <= self.chunk_size:
-                        current_a = combined
-                    else:
-                        if current_a:
-                            content = f"T: {q_text}\nJ: {current_a}"
-                            chunk = Chunk(
-                                content=content,
-                                index=len(chunks),
-                                start_char=char_position,
-                                end_char=char_position + len(content),
-                                token_count=self._estimate_tokens(content),
-                                metadata={
-                                    "content_type": "faq",
-                                    "faq_question": q_text,
-                                    "faq_sub_index": sub_idx,
-                                }
-                            )
-                            chunks.append(chunk)
-                            char_position += len(content) + 2
-                            sub_idx += 1
-                        current_a = sentence
-
-                # Flush sisa
-                if current_a:
-                    content = f"T: {q_text}\nJ: {current_a}"
-                    chunk = Chunk(
-                        content=content,
-                        index=len(chunks),
-                        start_char=char_position,
-                        end_char=char_position + len(content),
-                        token_count=self._estimate_tokens(content),
-                        metadata={
-                            "content_type": "faq",
-                            "faq_question": q_text,
-                            "faq_sub_index": sub_idx,
-                        }
-                    )
-                    chunks.append(chunk)
-                    char_position += len(content) + 2
-
-        logger.info(f"[CHUNKER] FAQ mode: {len(pairs)} pairs → {len(chunks)} chunks")
-        return chunks
+def _normalize_text(text: str) -> str:
+    return _WHITESPACE_RE.sub(" ", (text or "").strip())
 
 
-# Singleton instance
-chunker = Chunker(chunk_size=512, chunk_overlap=50)
+def _clean_soup(raw_html: str, css_selector: Optional[str] = None) -> Tag:
+    soup = BeautifulSoup(raw_html or "", "html.parser")
+    for comment in soup.find_all(string=lambda value: isinstance(value, Comment)):
+        comment.extract()
+    for tag_name in _SKIP_TAGS:
+        for element in soup.find_all(tag_name):
+            element.decompose()
+
+    if css_selector:
+        try:
+            selected = soup.select(css_selector)
+            if selected:
+                wrapper = soup.new_tag("div")
+                for element in selected:
+                    wrapper.append(element)
+                return wrapper
+        except Exception as exc:
+            logger.warning(f"[WEB-CHUNKER] Selector '{css_selector}' gagal untuk block extraction: {exc}")
+
+    return soup.find("main") or soup.find("article") or soup.body or soup
+
+
+def extract_html_blocks(
+    raw_html: str,
+    *,
+    css_selector: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Extract structure-aware blocks from HTML."""
+    root = _clean_soup(raw_html, css_selector=css_selector)
+    blocks: List[Dict[str, Any]] = []
+    heading_path: List[str] = []
+    order = 0
+
+    def visit(node: Tag) -> None:
+        nonlocal order, heading_path
+        for child in node.children:
+            if isinstance(child, NavigableString):
+                continue
+            if not isinstance(child, Tag):
+                continue
+
+            tag_name = child.name.lower()
+            if tag_name in _HEADING_TAGS:
+                text = _normalize_text(child.get_text(" ", strip=True))
+                if text:
+                    level = _HEADING_TAGS[tag_name]
+                    heading_path = heading_path[:level - 1] + [text]
+                    blocks.append({
+                        "page_number": 1,
+                        "text": text,
+                        "block_type": "heading",
+                        "heading_level": level,
+                        "heading_text": text,
+                        "heading_path": list(heading_path),
+                        "source_kind": "narrative",
+                        "block_order": order,
+                        "metadata": {},
+                    })
+                    order += 1
+                continue
+
+            if tag_name in {"table"}:
+                rows = child.find_all("tr")
+                header_cells: List[str] = []
+                for row_index, row in enumerate(rows, start=1):
+                    cells = [_normalize_text(cell.get_text(" ", strip=True)) for cell in row.find_all(["th", "td"])]
+                    cells = [cell for cell in cells if cell]
+                    if not cells:
+                        continue
+                    if not header_cells:
+                        header_cells = cells
+                        blocks.append({
+                            "page_number": 1,
+                            "text": " | ".join(header_cells),
+                            "block_type": "sheet_header",
+                            "heading_level": None,
+                            "heading_text": heading_path[-1] if heading_path else "",
+                            "heading_path": list(heading_path),
+                            "source_kind": "table",
+                            "row_start": row_index,
+                            "row_end": row_index,
+                            "block_order": order,
+                            "metadata": {},
+                        })
+                        order += 1
+                        continue
+                    row_text = " | ".join(header_cells) + "\n" + " | ".join(cells)
+                    blocks.append({
+                        "page_number": 1,
+                        "text": row_text,
+                        "block_type": "table_row",
+                        "heading_level": None,
+                        "heading_text": heading_path[-1] if heading_path else "",
+                        "heading_path": list(heading_path),
+                        "source_kind": "table",
+                        "row_start": row_index,
+                        "row_end": row_index,
+                        "block_order": order,
+                        "metadata": {},
+                    })
+                    order += 1
+                continue
+
+            if tag_name in _BLOCK_TAGS:
+                text = _normalize_text(child.get_text(" ", strip=True))
+                if text:
+                    block_type = "list_item" if tag_name == "li" else "paragraph"
+                    blocks.append({
+                        "page_number": 1,
+                        "text": text,
+                        "block_type": block_type,
+                        "heading_level": None,
+                        "heading_text": heading_path[-1] if heading_path else "",
+                        "heading_path": list(heading_path),
+                        "source_kind": "narrative",
+                        "block_order": order,
+                        "metadata": {"tag_name": tag_name},
+                    })
+                    order += 1
+                continue
+
+            visit(child)
+
+    visit(root)
+    return blocks
+
+
+def chunk_html(
+    raw_html: str,
+    *,
+    css_selector: Optional[str] = None,
+) -> List[ChunkItem]:
+    """Create parent-child chunks from HTML blocks."""
+    blocks = extract_html_blocks(raw_html, css_selector=css_selector)
+    chunks = structure_chunk_document(
+        blocks,
+        child_chunk_size=config.WEB_CHILD_CHUNK_SIZE,
+        parent_chunk_size=config.WEB_PARENT_CHUNK_SIZE,
+        overlap=max(20, config.DOC_CHUNK_OVERLAP // 2),
+        enable_semantic_merge=config.ENABLE_SEMANTIC_MERGE,
+        similarity_threshold=config.SEMANTIC_MERGE_SIM_THRESHOLD,
+    )
+    logger.info(f"[WEB-CHUNKER] HTML blocks={len(blocks)} -> chunks={len(chunks)}")
+    return chunks
+
+
+def chunk_text(plain_text: str) -> List[ChunkItem]:
+    """Create structure-aware chunks from plain text content."""
+    paragraphs = [part.strip() for part in re.split(r"\n\s*\n+", plain_text or "") if part.strip()]
+    blocks: List[Dict[str, Any]] = []
+    for index, paragraph in enumerate(paragraphs):
+        blocks.append({
+            "page_number": 1,
+            "text": paragraph,
+            "block_type": "paragraph",
+            "heading_text": "",
+            "heading_path": [],
+            "source_kind": "narrative",
+            "block_order": index,
+            "metadata": {},
+        })
+
+    return structure_chunk_document(
+        blocks,
+        child_chunk_size=config.WEB_CHILD_CHUNK_SIZE,
+        parent_chunk_size=config.WEB_PARENT_CHUNK_SIZE,
+        overlap=max(20, config.DOC_CHUNK_OVERLAP // 2),
+        enable_semantic_merge=config.ENABLE_SEMANTIC_MERGE,
+        similarity_threshold=config.SEMANTIC_MERGE_SIM_THRESHOLD,
+    )
+
+
+def chunk_faq(
+    pairs: list,
+    *,
+    heading_path: Optional[List[str]] = None,
+) -> List[ChunkItem]:
+    """Chunk FAQ pairs while preserving question and optional page heading path."""
+    blocks: List[Dict[str, Any]] = []
+    block_order = 0
+    active_heading_path = list(heading_path or [])
+
+    for question, answer in pairs:
+        q_text = _normalize_text(question)
+        a_text = _normalize_text(answer)
+        if not q_text or not a_text:
+            continue
+        text = f"Pertanyaan: {q_text}\nJawaban: {a_text}"
+        blocks.append({
+            "page_number": 1,
+            "text": text,
+            "block_type": "faq_item",
+            "heading_level": None,
+            "heading_text": active_heading_path[-1] if active_heading_path else "",
+            "heading_path": list(active_heading_path),
+            "source_kind": "faq",
+            "block_order": block_order,
+            "metadata": {"faq_question": q_text},
+        })
+        block_order += 1
+
+    return structure_chunk_document(
+        blocks,
+        child_chunk_size=config.WEB_CHILD_CHUNK_SIZE,
+        parent_chunk_size=config.WEB_PARENT_CHUNK_SIZE,
+        overlap=0,
+        enable_semantic_merge=False,
+        similarity_threshold=1.0,
+    )

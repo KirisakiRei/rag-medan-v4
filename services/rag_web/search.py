@@ -27,6 +27,47 @@ def set_instances(embedding_model: SentenceTransformer, qdrant_client: AsyncQdra
     qdrant = qdrant_client
 
 
+async def _retrieve_payloads_by_ids(point_ids: List[str]) -> Dict[str, Dict[str, Any]]:
+    valid_ids = [point_id for point_id in point_ids if point_id]
+    if not valid_ids:
+        return {}
+    points = await qdrant.retrieve(
+        collection_name=config.COLLECTION_WEB,
+        ids=valid_ids,
+        with_payload=True,
+        with_vectors=False,
+    )
+    return {str(point.id): dict(point.payload or {}) for point in points}
+
+
+async def _expand_web_context(payload: Dict[str, Any]) -> str:
+    """Expand web chunk context using parent or siblings."""
+    content = payload.get("content", "") or ""
+    if not config.RETRIEVAL_CONTEXT_EXPANSION:
+        return content
+
+    related = await _retrieve_payloads_by_ids([
+        payload.get("parent_chunk_id"),
+        payload.get("window_prev_id"),
+        payload.get("window_next_id"),
+    ])
+    parent_payload = related.get(str(payload.get("parent_chunk_id")))
+    if parent_payload and len(content) < 420:
+        return parent_payload.get("content", content)
+
+    parts = []
+    prev_payload = related.get(str(payload.get("window_prev_id")))
+    next_payload = related.get(str(payload.get("window_next_id")))
+    if prev_payload:
+        parts.append(prev_payload.get("content", ""))
+    parts.append(content)
+    if next_payload:
+        parts.append(next_payload.get("content", ""))
+
+    expanded = "\n\n".join(part for part in parts if part and part.strip())
+    return expanded or content
+
+
 async def search_web_bank(
     question: str,
     wa_number: str = "unknown",
@@ -61,8 +102,16 @@ async def search_web_bank(
             query_filter=qdrant_models.Filter(
                 must=[
                     qdrant_models.FieldCondition(
+                        key="is_active",
+                        match=qdrant_models.MatchValue(value=True)
+                    ),
+                    qdrant_models.FieldCondition(
                         key="is_deleted",
                         match=qdrant_models.MatchValue(value=False)
+                    ),
+                    qdrant_models.FieldCondition(
+                        key="chunk_level",
+                        match=qdrant_models.MatchValue(value="child")
                     )
                 ]
             ),
@@ -114,12 +163,13 @@ async def search_web_bank(
     for hit in results:
         payload = hit.payload
         score = float(hit.score)
+        expanded_content = await _expand_web_context(payload)
         
         similar_questions.append({
             "question": "-",
             "question_rag_name": "-",
             "answer_id": None,
-            "answer_doc": payload.get("content", ""),
+            "answer_doc": expanded_content,
             "category_id": None,
             "dense_score": round(score, 3),
             "overlap_score": 0.0,
@@ -128,8 +178,14 @@ async def search_web_bank(
         })
     
     web_info = {
+        "web_bank_id": top_result_payload.get("web_bank_id") or top_result_payload.get("link_id", ""),
+        "name": top_result_payload.get("name", ""),
+        "opd_id": top_result_payload.get("opd_id", ""),
         "url": top_result_payload.get("url", ""),
         "title": top_result_payload.get("title", ""),
+        "is_active": top_result_payload.get("is_active", True),
+        "section_title": top_result_payload.get("section_title", ""),
+        "heading_path": top_result_payload.get("heading_path", ""),
         "link_id": top_result_payload.get("link_id", "")
     }
     
@@ -217,8 +273,16 @@ async def search_web_unified(
             query_filter=qdrant_models.Filter(
                 must=[
                     qdrant_models.FieldCondition(
+                        key="is_active",
+                        match=qdrant_models.MatchValue(value=True)
+                    ),
+                    qdrant_models.FieldCondition(
                         key="is_deleted",
                         match=qdrant_models.MatchValue(value=False)
+                    ),
+                    qdrant_models.FieldCondition(
+                        key="chunk_level",
+                        match=qdrant_models.MatchValue(value="child")
                     )
                 ]
             ),
@@ -256,11 +320,17 @@ async def search_web_unified(
         for idx, hit in enumerate(results[:top_k]):
             payload = hit.payload
             score = float(hit.score)
-            web_content = payload.get("content", "")
+            web_content = await _expand_web_context(payload)
             
             web_info = {
+                "web_bank_id": payload.get("web_bank_id") or payload.get("link_id", ""),
+                "name": payload.get("name", ""),
+                "opd_id": payload.get("opd_id", ""),
                 "url": payload.get("url", ""),
                 "title": payload.get("title", ""),
+                "is_active": payload.get("is_active", True),
+                "section_title": payload.get("section_title", ""),
+                "heading_path": payload.get("heading_path", ""),
                 "link_id": payload.get("link_id", "")
             }
             

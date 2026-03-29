@@ -24,7 +24,10 @@ class DocSearchRequest(BaseModel):
 class DocSyncRequest(BaseModel):
     doc_id: str
     opd_name: Optional[str] = None
+    organization_id: Optional[str] = None
+    filename: Optional[str] = None
     file_url: str
+    is_active: bool = True
 
 
 class DocDeleteRequest(BaseModel):
@@ -42,19 +45,29 @@ class UsulanSearchRequest(BaseModel):
 
 
 class WebTriggerRequest(BaseModel):
-    link_id: str
+    web_bank_id: str
+    name: str
+    opd_id: str
     url: str
-    callback_url: Optional[str] = None
+    css_selector: Optional[str] = None
+    scrape_interval: Optional[int] = None
+    is_active: bool = True
     metadata: Optional[dict] = Field(default_factory=dict)
 
 
-class WebSyncRequest(BaseModel):
-    link_id: str
-    edited_content: str
+class WebUpdateRequest(BaseModel):
+    web_bank_id: str
+    name: str
+    opd_id: str
+    url: str
+    css_selector: Optional[str] = None
+    scrape_interval: Optional[int] = None
+    is_active: bool = True
+    metadata: Optional[dict] = Field(default_factory=dict)
 
 
 class WebDeleteRequest(BaseModel):
-    link_id: str
+    web_bank_id: str
 
 
 class WebSearchRequest(BaseModel):

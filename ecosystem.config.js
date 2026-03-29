@@ -17,7 +17,7 @@ const path = require('path');
 const os = require('os');
 
 // ── Ubah HANYA nilai ini untuk mengganti port orchestrator ──
-const ORCHESTRATOR_PORT = 5100;
+const ORCHESTRATOR_PORT = 5000;
 
 // Detect OS and set correct Python path
 const isWindows = os.platform() === 'win32';

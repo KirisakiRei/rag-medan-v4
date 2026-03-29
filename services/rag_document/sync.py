@@ -517,9 +517,13 @@ async def sync_document(
     file_url: str,
     organization_id: Optional[str] = None,
     filename: Optional[str] = None,
+    is_active: bool = True,
 ) -> Dict[str, Any]:
     logger.info("[API] ========== DOC-SYNC START ==========")
-    logger.info(f"[API] doc_id={doc_id} | org={organization_id} | filename={filename}")
+    logger.info(
+        f"[API] doc_id={doc_id} | org={organization_id} | "
+        f"filename={filename} | is_active={is_active}"
+    )
     logger.info(f"[API] file_url={file_url}")
 
     file_ext = ""
@@ -565,6 +569,7 @@ async def sync_document(
         "organization_id": organization_id,
         "filename": filename,
         "file_url": file_path,
+        "is_active": is_active,
         "lang": "id",
         "collection_name": config.COLLECTION_DOCUMENT,
     }

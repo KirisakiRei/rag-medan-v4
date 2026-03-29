@@ -1,11 +1,12 @@
 """Sync module for web_scraping_bank."""
+import hashlib
 import os
 import sys
-import time
 import logging
-import uuid
-from typing import Dict, Any, List, Optional
+import threading
+import time
 from datetime import datetime
+from typing import Dict, Any, List, Optional
 
 from sentence_transformers import SentenceTransformer
 from qdrant_client import AsyncQdrantClient
@@ -15,15 +16,35 @@ from qdrant_client.http.models import PointStruct
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from config import config
+from services.rag_document.chunker import ChunkItem
 from services.rag_web.scraper import scraper
 from services.rag_web.cleaner import cleaner
-from services.rag_web.chunker import chunker, Chunk
+from services.rag_web import chunker as web_chunker
 from shared.utils import encode_texts
 
 logger = logging.getLogger("rag_web.sync")
 
 model: SentenceTransformer = None
 qdrant: AsyncQdrantClient = None
+
+_STATE_VECTOR = [0.0]
+_active_jobs: set[str] = set()
+_active_jobs_lock = threading.Lock()
+
+
+def reserve_job(web_bank_id: str) -> bool:
+    """Reserve an in-flight scraping slot for a web bank."""
+    with _active_jobs_lock:
+        if web_bank_id in _active_jobs:
+            return False
+        _active_jobs.add(web_bank_id)
+        return True
+
+
+def release_job(web_bank_id: str) -> None:
+    """Release an in-flight scraping slot for a web bank."""
+    with _active_jobs_lock:
+        _active_jobs.discard(web_bank_id)
 
 
 def set_instances(embedding_model: SentenceTransformer, qdrant_client: AsyncQdrantClient):
@@ -33,373 +54,1168 @@ def set_instances(embedding_model: SentenceTransformer, qdrant_client: AsyncQdra
     qdrant = qdrant_client
 
 
-async def store_chunks(
-    link_id: str,
-    url: str,
-    title: Optional[str],
-    chunks: List[Chunk],
-    embeddings: List[List[float]],
-    metadata: Dict[str, Any] = None
-) -> List[str]:
-    """Store chunks to Qdrant."""
-    if len(chunks) != len(embeddings):
-        raise ValueError("Chunks and embeddings count mismatch")
-    
-    points = []
-    point_ids = []
-    now = datetime.utcnow().isoformat()
-    
-    for i, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
-        point_id = str(uuid.uuid4())
-        point_ids.append(point_id)
-        
-        payload = {
-            "link_id": link_id,
-            "url": url,
-            "title": title or "",
-            "content": chunk.content,
-            "chunk_index": i,
-            "total_chunks": len(chunks),
-            "token_count": chunk.token_count,
-            "is_deleted": False,
-            "created_at": now,
-            "updated_at": now,
-            # Tambahan: content_type dan faq_question dari chunk metadata
-            "content_type": chunk.metadata.get("content_type", "general"),
-            "faq_question": chunk.metadata.get("faq_question", None),
-            "metadata": metadata or {}
-        }
-
-        # Hapus key None agar payload bersih
-        payload = {k: v for k, v in payload.items() if v is not None}
-
-        points.append(PointStruct(id=point_id, vector=embedding, payload=payload))
-    
-    await qdrant.upsert(collection_name=config.COLLECTION_WEB, points=points)
-    logger.info(f"[SYNC] Stored {len(points)} points for link_id: {link_id}")
-    
-    return point_ids
+def _utcnow_iso() -> str:
+    return datetime.utcnow().isoformat()
 
 
-async def get_chunks_by_link_id(
-    link_id: str,
-    include_deleted: bool = False
-) -> List[Dict[str, Any]]:
-    """Get chunks by link_id."""
-    filter_conditions = [
+def _log_stage(
+    web_bank_id: str,
+    stage: str,
+    message: str,
+    *,
+    job_id: Optional[str] = None,
+    started_at: Optional[float] = None,
+    level: str = "info",
+    **extra: Any,
+) -> None:
+    """Log progress stage for scraping monitoring."""
+    parts = [f"web_bank_id={web_bank_id}", f"stage={stage}"]
+    if job_id:
+        parts.append(f"job_id={job_id}")
+    if started_at is not None:
+        parts.append(f"elapsed={time.monotonic() - started_at:.2f}s")
+    for key, value in extra.items():
+        if value is not None:
+            parts.append(f"{key}={value}")
+    log_line = f"[PROGRESS] {' | '.join(parts)} | {message}"
+    getattr(logger, level)(log_line)
+
+
+def _content_hash(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _count_paragraphs(text: str) -> int:
+    return len([part for part in text.split("\n\n") if part.strip()])
+
+
+def _normalize_optional_text(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    normalized = str(value).strip()
+    return normalized or None
+
+
+def _chunk_filter(web_bank_id: str, include_deleted: bool = False) -> qdrant_models.Filter:
+    conditions = [
+        qdrant_models.FieldCondition(
+            key="web_bank_id",
+            match=qdrant_models.MatchValue(value=web_bank_id)
+        ),
         qdrant_models.FieldCondition(
             key="link_id",
-            match=qdrant_models.MatchValue(value=link_id)
-        )
+            match=qdrant_models.MatchValue(value=web_bank_id)
+        ),
     ]
-    
+    must_conditions: List[qdrant_models.FieldCondition] = []
     if not include_deleted:
-        filter_conditions.append(
+        must_conditions.append(
             qdrant_models.FieldCondition(
                 key="is_deleted",
                 match=qdrant_models.MatchValue(value=False)
             )
         )
-    
-    results = await qdrant.scroll(
-        collection_name=config.COLLECTION_WEB,
-        scroll_filter=qdrant_models.Filter(must=filter_conditions),
-        limit=1000,
+
+    return qdrant_models.Filter(
+        must=must_conditions or None,
+        min_should=qdrant_models.MinShould(conditions=conditions, min_count=1),
+    )
+
+
+async def get_web_state(web_bank_id: str) -> Optional[Dict[str, Any]]:
+    """Get persisted web scraping state for a web bank."""
+    points = await qdrant.retrieve(
+        collection_name=config.COLLECTION_WEB_STATE,
+        ids=[web_bank_id],
         with_payload=True,
-        with_vectors=False
+        with_vectors=False,
     )
-    
-    chunks = [{"id": point.id, **point.payload} for point in results[0]]
-    chunks.sort(key=lambda x: x.get("chunk_index", 0))
-    
-    return chunks
+    if not points:
+        return None
+    return dict(points[0].payload or {})
 
 
-async def soft_delete_by_link_id(link_id: str) -> int:
-    """Soft delete chunks by link_id."""
-    chunks = await get_chunks_by_link_id(link_id)
-    
-    if not chunks:
-        return 0
-    
-    point_ids = [chunk["id"] for chunk in chunks]
-    now = datetime.utcnow().isoformat()
-    
-    await qdrant.set_payload(
-        collection_name=config.COLLECTION_WEB,
-        payload={"is_deleted": True, "deleted_at": now, "updated_at": now},
-        points=point_ids
+async def upsert_web_state(web_bank_id: str, updates: Dict[str, Any]) -> Dict[str, Any]:
+    """Merge and persist web scraping state."""
+    existing = await get_web_state(web_bank_id) or {}
+    payload = {
+        **existing,
+        **updates,
+        "web_bank_id": web_bank_id,
+        "updated_at": _utcnow_iso(),
+    }
+    payload.setdefault("is_active", True)
+    payload = {k: v for k, v in payload.items() if v is not None}
+
+    await qdrant.upsert(
+        collection_name=config.COLLECTION_WEB_STATE,
+        points=[PointStruct(id=web_bank_id, vector=_STATE_VECTOR, payload=payload)],
     )
-    
-    logger.info(f"[SYNC] Soft deleted {len(point_ids)} chunks for link_id: {link_id}")
-    return len(point_ids)
+    return payload
 
 
-async def hard_delete_by_link_id(link_id: str) -> int:
-    """Hard delete chunks by link_id."""
+async def store_chunks(
+    web_bank_id: str,
+    name: str,
+    opd_id: str,
+    url: str,
+    title: Optional[str],
+    parent_chunks: List[ChunkItem],
+    child_chunks: List[ChunkItem],
+    child_embeddings: List[List[float]],
+    content_hash: str,
+    scraped_at: str,
+    is_active: bool = True,
+    metadata: Optional[Dict[str, Any]] = None,
+) -> List[str]:
+    """Store chunks to Qdrant."""
+    if len(child_chunks) != len(child_embeddings):
+        raise ValueError("Child chunks and embeddings count mismatch")
+
+    points = []
+    point_ids = []
+    now = _utcnow_iso()
+
+    def build_payload(chunk: ChunkItem, total_chunks: int) -> Dict[str, Any]:
+        payload = {
+            "web_bank_id": web_bank_id,
+            "link_id": web_bank_id,
+            "name": name,
+            "opd_id": opd_id,
+            "url": url,
+            "title": title or "",
+            "content": chunk.text,
+            "chunk_index": chunk.block_order,
+            "total_chunks": total_chunks,
+            "token_count": chunk.token_count,
+            "content_hash": content_hash,
+            "scraped_at": scraped_at,
+            "chunk_id": chunk.chunk_id,
+            "chunk_level": chunk.chunk_level,
+            "chunk_kind": chunk.chunk_kind,
+            "source_kind": chunk.source_kind,
+            "section_title": chunk.section_title,
+            "heading_path": chunk.heading_path,
+            "page_start": chunk.page_start,
+            "page_end": chunk.page_end,
+            "parent_chunk_id": chunk.parent_chunk_id,
+            "window_prev_id": chunk.window_prev_id,
+            "window_next_id": chunk.window_next_id,
+            "is_active": is_active,
+            "is_deleted": False,
+            "created_at": now,
+            "updated_at": now,
+            "metadata": {**(metadata or {}), **chunk.metadata},
+        }
+        return {k: v for k, v in payload.items() if v is not None}
+
+    for chunk in parent_chunks:
+        points.append(
+            PointStruct(
+                id=chunk.chunk_id,
+                vector=[0.0] * config.EMBEDDING_DIMENSION,
+                payload=build_payload(chunk, len(child_chunks)),
+            )
+        )
+        point_ids.append(chunk.chunk_id)
+
+    for chunk, embedding in zip(child_chunks, child_embeddings):
+        vector = embedding.tolist() if hasattr(embedding, "tolist") else embedding
+        points.append(
+            PointStruct(
+                id=chunk.chunk_id,
+                vector=vector,
+                payload=build_payload(chunk, len(child_chunks)),
+            )
+        )
+        point_ids.append(chunk.chunk_id)
+
+    await qdrant.upsert(collection_name=config.COLLECTION_WEB, points=points)
+    logger.info(
+        f"[SYNC] Stored {len(parent_chunks)} parent + {len(child_chunks)} child points "
+        f"for web_bank_id={web_bank_id}"
+    )
+    return point_ids
+
+
+async def get_chunks_by_web_bank_id(
+    web_bank_id: str,
+    include_deleted: bool = False,
+    chunk_level: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Get chunks by web_bank_id."""
+    base_filter = _chunk_filter(web_bank_id, include_deleted=include_deleted)
+    must_conditions = list(base_filter.must or [])
+    if chunk_level:
+        must_conditions.append(
+            qdrant_models.FieldCondition(
+                key="chunk_level",
+                match=qdrant_models.MatchValue(value=chunk_level)
+            )
+        )
+
     results = await qdrant.scroll(
         collection_name=config.COLLECTION_WEB,
         scroll_filter=qdrant_models.Filter(
-            must=[
-                qdrant_models.FieldCondition(
-                    key="link_id",
-                    match=qdrant_models.MatchValue(value=link_id)
-                )
-            ]
+            must=must_conditions or None,
+            min_should=base_filter.min_should,
         ),
         limit=1000,
-        with_payload=False,
-        with_vectors=False
+        with_payload=True,
+        with_vectors=False,
     )
-    
-    points = results[0]
-    
-    if not points:
+
+    chunks = [{"id": point.id, **(point.payload or {})} for point in results[0]]
+    chunks.sort(key=lambda item: (item.get("chunk_level") != "parent", item.get("chunk_index", 0)))
+    return chunks
+
+
+async def restore_chunks_by_web_bank_id(web_bank_id: str, is_active: bool = True) -> int:
+    """Restore previously soft-deleted chunks for a web_bank_id."""
+    chunks = await get_chunks_by_web_bank_id(web_bank_id, include_deleted=True)
+    if not chunks:
         return 0
-    
-    point_ids = [point.id for point in points]
-    
-    await qdrant.delete(
+
+    point_ids = [chunk["id"] for chunk in chunks]
+    now = _utcnow_iso()
+    await qdrant.set_payload(
         collection_name=config.COLLECTION_WEB,
-        points_selector=qdrant_models.PointIdsList(points=point_ids)
+        payload={"is_deleted": False, "is_active": is_active, "deleted_at": None, "updated_at": now},
+        points=point_ids,
     )
-    
-    logger.info(f"[SYNC] Hard deleted {len(point_ids)} chunks for link_id: {link_id}")
+    logger.info(f"[SYNC] Restored {len(point_ids)} soft-deleted chunks for web_bank_id={web_bank_id}")
     return len(point_ids)
 
 
-async def process_url(
-    link_id: str,
+async def update_chunk_metadata(
+    web_bank_id: str,
+    *,
+    name: Optional[str] = None,
+    opd_id: Optional[str] = None,
+    url: Optional[str] = None,
+    title: Optional[str] = None,
+    is_active: Optional[bool] = None,
+) -> int:
+    """Update top-level metadata fields on existing chunks without rewriting content."""
+    chunks = await get_chunks_by_web_bank_id(web_bank_id, include_deleted=True)
+    if not chunks:
+        return 0
+
+    payload = {"updated_at": _utcnow_iso()}
+    if name is not None:
+        payload["name"] = name
+    if opd_id is not None:
+        payload["opd_id"] = opd_id
+    if url is not None:
+        payload["url"] = url
+    if title is not None:
+        payload["title"] = title
+    if is_active is not None:
+        payload["is_active"] = is_active
+
+    point_ids = [chunk["id"] for chunk in chunks]
+    await qdrant.set_payload(
+        collection_name=config.COLLECTION_WEB,
+        payload=payload,
+        points=point_ids,
+    )
+    logger.info(f"[SYNC] Updated metadata on {len(point_ids)} chunks for web_bank_id={web_bank_id}")
+    return len(point_ids)
+
+
+async def soft_delete_by_web_bank_id(web_bank_id: str) -> int:
+    """Soft delete chunks by web_bank_id."""
+    chunks = await get_chunks_by_web_bank_id(web_bank_id)
+    if not chunks:
+        return 0
+
+    point_ids = [chunk["id"] for chunk in chunks]
+    now = _utcnow_iso()
+    await qdrant.set_payload(
+        collection_name=config.COLLECTION_WEB,
+        payload={"is_deleted": True, "is_active": False, "deleted_at": now, "updated_at": now},
+        points=point_ids,
+    )
+    logger.info(f"[SYNC] Soft deleted {len(point_ids)} chunks for web_bank_id={web_bank_id}")
+    return len(point_ids)
+
+
+async def hard_delete_by_web_bank_id(web_bank_id: str) -> int:
+    """Hard delete chunks by web_bank_id."""
+    results = await qdrant.scroll(
+        collection_name=config.COLLECTION_WEB,
+        scroll_filter=_chunk_filter(web_bank_id, include_deleted=True),
+        limit=1000,
+        with_payload=False,
+        with_vectors=False,
+    )
+    points = results[0]
+    if not points:
+        return 0
+
+    point_ids = [point.id for point in points]
+    await qdrant.delete(
+        collection_name=config.COLLECTION_WEB,
+        points_selector=qdrant_models.PointIdsList(points=point_ids),
+    )
+    logger.info(f"[SYNC] Hard deleted {len(point_ids)} chunks for web_bank_id={web_bank_id}")
+    return len(point_ids)
+
+
+async def _send_callback_once(
+    sent_callbacks: set[tuple[str, str]],
+    web_bank_id: str,
+    url: str,
+    status: str,
+    result: Dict[str, Any],
+    *,
+    job_id: Optional[str] = None,
+    started_at: Optional[float] = None,
+) -> bool:
+    from services.rag_web.webhook import build_callback_payload, send_callback
+
+    payload = build_callback_payload(status, result)
+    signature = (payload["scrape_status"], payload["scrape_message"])
+    if signature in sent_callbacks:
+        logger.info(
+            f"[CALLBACK] Skip duplicate callback web_bank_id={web_bank_id} "
+            f"status={payload['scrape_status']}"
+        )
+        return False
+
+    _log_stage(
+        web_bank_id,
+        "callback",
+        "Mengirim callback ke WA manajemen",
+        job_id=job_id,
+        started_at=started_at,
+        scrape_status=payload["scrape_status"],
+    )
+    sent_callbacks.add(signature)
+    callback_ok = await send_callback(web_bank_id, url, status, result)
+    _log_stage(
+        web_bank_id,
+        "callback",
+        "Callback selesai diproses",
+        job_id=job_id,
+        started_at=started_at,
+        status_sent=payload["scrape_status"],
+        delivered=callback_ok,
+    )
+    return callback_ok
+
+
+async def register_inactive_web_bank(
+    web_bank_id: str,
+    name: str,
+    opd_id: str,
     url: str,
     css_selector: Optional[str] = None,
-    use_js_renderer: Optional[bool] = None,
-    wait_selector: Optional[str] = None,
-    content_type: str = "general",
-    faq_question_selector: Optional[str] = None,
-    faq_answer_selector: Optional[str] = None,
-    force_rescrape: bool = False,
-    callback_url: Optional[str] = None,
-    metadata: Optional[Dict[str, Any]] = None
+    scrape_interval: Optional[int] = None,
+    metadata: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Pipeline: scrape → clean/extract → chunk → embed → store."""
-    from services.rag_web.webhook import send_callback
+    """Register or update a web bank as inactive without scraping."""
+    existing_state = await get_web_state(web_bank_id) or {}
+    await update_chunk_metadata(
+        web_bank_id,
+        name=name,
+        opd_id=opd_id,
+        is_active=False,
+    )
+    await upsert_web_state(
+        web_bank_id,
+        {
+            "name": name,
+            "opd_id": opd_id,
+            "url": url,
+            "css_selector": css_selector,
+            "scrape_interval": scrape_interval,
+            "is_active": False,
+            "last_scrape_status": existing_state.get("last_scrape_status", "inactive"),
+            "last_scrape_message": "Web bank tersimpan dalam status nonaktif. Scraping tidak dijalankan.",
+            "metadata": metadata if metadata is not None else existing_state.get("metadata") or {},
+        },
+    )
+    logger.info(f"[SYNC] Registered inactive web bank without scraping: {web_bank_id}")
+    return {
+        "status": "inactive",
+        "web_bank_id": web_bank_id,
+        "message": "Web bank nonaktif. Metadata tersimpan tanpa scraping.",
+    }
+
+
+async def process_url(
+    web_bank_id: str,
+    name: str,
+    opd_id: str,
+    url: str,
+    css_selector: Optional[str] = None,
+    scrape_interval: Optional[int] = None,
+    is_active: bool = True,
+    metadata: Optional[Dict[str, Any]] = None,
+    job_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Pipeline: scrape -> clean/extract -> dedup -> chunk -> embed -> store."""
+    sent_callbacks: set[tuple[str, str]] = set()
+    existing_state = await get_web_state(web_bank_id) or {}
+    was_inactive = not bool(existing_state.get("is_active", True))
+    started_at = time.monotonic()
 
     try:
         logger.info(
-            f"[SYNC] process_url start: link_id={link_id}, url={url}, "
-            f"content_type={content_type}, css_selector={css_selector}, "
-            f"use_js_renderer={use_js_renderer}, force_rescrape={force_rescrape}"
+            f"[SYNC] process_url start: web_bank_id={web_bank_id}, opd_id={opd_id}, "
+            f"url={url}, css_selector={css_selector}, scrape_interval={scrape_interval}"
         )
-
-
-        if not force_rescrape:
-            existing = await get_chunks_by_link_id(link_id)
-            if existing:
-                logger.info(
-                    f"[SYNC] link_id={link_id} sudah ada ({len(existing)} chunks). "
-                    "Gunakan force_rescrape=True untuk memproses ulang."
-                )
-                result = {
-                    "status": "skipped",
-                    "reason": "already_exists",
-                    "link_id": link_id,
-                    "url": url,
-                    "chunks_count": len(existing),
-                }
-                await send_callback(link_id, url, "skipped", result, callback_url)
-                return result
-
-        await send_callback(link_id, url, "scraping", {})
-        scraped = await scraper.scrape(
+        _log_stage(
+            web_bank_id,
+            "start",
+            "Pipeline scraping dimulai",
+            job_id=job_id,
+            started_at=started_at,
             url=url,
-            use_js_renderer=use_js_renderer,
-            wait_selector=wait_selector,
+            css_selector=css_selector or "-",
+            scrape_interval=scrape_interval,
         )
+
+        await upsert_web_state(
+            web_bank_id,
+            {
+                "name": name,
+                "opd_id": opd_id,
+                "url": url,
+                "css_selector": css_selector,
+                "scrape_interval": scrape_interval,
+                "is_active": is_active,
+                "last_job_id": job_id,
+                "last_scrape_status": "scraping",
+                "last_scrape_message": "Sedang mengambil konten dari halaman web...",
+            },
+        )
+        await _send_callback_once(
+            sent_callbacks,
+            web_bank_id,
+            url,
+            "scraping",
+            {"scrape_message": "Sedang mengambil konten dari halaman web..."},
+            job_id=job_id,
+            started_at=started_at,
+        )
+
+        try:
+            from services.rag_web.rate_limiter import rate_limiter
+
+            _log_stage(
+                web_bank_id,
+                "rate_limit",
+                "Menunggu rate limiter per domain jika diperlukan",
+                job_id=job_id,
+                started_at=started_at,
+            )
+            await rate_limiter.wait_for_domain(url)
+        except Exception as exc:
+            logger.warning(f"[SYNC] Rate limiter error (ignored): {exc}")
+
+        _log_stage(
+            web_bank_id,
+            "fetch",
+            "Mengambil HTML halaman web",
+            job_id=job_id,
+            started_at=started_at,
+        )
+        scraped = await scraper.scrape(url=url, use_js_renderer=None, wait_selector=None)
         raw_html = scraped.get("raw_html", "")
+        _log_stage(
+            web_bank_id,
+            "fetch",
+            "HTML berhasil diambil",
+            job_id=job_id,
+            started_at=started_at,
+            status_code=scraped.get("status_code"),
+            html_chars=len(raw_html),
+        )
+        title = cleaner.extract_title(raw_html) or existing_state.get("title")
+        _log_stage(
+            web_bank_id,
+            "extract_title",
+            "Judul halaman berhasil diekstrak",
+            job_id=job_id,
+            started_at=started_at,
+            title=(title or "-")[:80],
+        )
 
+        _log_stage(
+            web_bank_id,
+            "clean",
+            "Membersihkan dan mengekstrak konten utama",
+            job_id=job_id,
+            started_at=started_at,
+            selector_mode=bool(css_selector),
+        )
+        if css_selector:
+            clean_content = cleaner.clean_with_selector(raw_html, css_selector, url)
+        else:
+            clean_content = cleaner.clean(raw_html, url)
 
-        title = cleaner.extract_title(raw_html)
-
-
-        chunks: List[Chunk] = []
-
-        if content_type == "faq":
-            # Mode FAQ: ekstrak pasangan Q&A
-            from services.rag_web.faq_extractor import extract_faq_pairs
-
-            pairs = extract_faq_pairs(
-                raw_html=raw_html,
-                question_selector=faq_question_selector,
-                answer_selector=faq_answer_selector,
+        clean_content = (clean_content or "").strip()
+        _log_stage(
+            web_bank_id,
+            "clean",
+            "Konten utama berhasil dibersihkan",
+            job_id=job_id,
+            started_at=started_at,
+            clean_chars=len(clean_content),
+        )
+        if len(clean_content) < 50:
+            raise Exception(
+                f"konten terlalu pendek atau kosong setelah cleaning ({len(clean_content)} chars)"
             )
 
-            if pairs:
-                logger.info(f"[SYNC] FAQ mode: {len(pairs)} pasangan Q&A ditemukan")
-                chunks = chunker.chunk_faq(pairs, url)
-                base_metadata = {
-                    **(metadata or {}),
-                    "content_type": "faq",
-                    "faq_pairs_count": len(pairs),
-                }
-            else:
-                logger.warning(
-                    "[SYNC] FAQ mode: tidak ada pasangan Q&A terdeteksi, "
-                    "fallback ke general extraction"
-                )
-                # Fallback ke general
-                content_type = "general"
-
-        if content_type in ("general", "article") or (content_type == "faq" and not chunks):
-            # Mode general/article: clean → chunk
-            if css_selector:
-                clean_content = cleaner.clean_with_selector(raw_html, css_selector, url)
-            else:
-                clean_content = cleaner.clean(raw_html, url)
-
-            if not clean_content or len(clean_content.strip()) < 50:
-                raise Exception(
-                    f"Konten terlalu pendek atau kosong setelah cleaning ({len(clean_content or '')} chars)"
-                )
-
-            chunks = chunker.chunk(clean_content, url)
-            base_metadata = {
-                **(metadata or {}),
-                "content_type": content_type,
-            }
-
-        if not chunks:
-            raise Exception("Tidak ada chunk yang berhasil dibuat")
-
-
-        chunk_texts = [chunk.content for chunk in chunks]
-        embeddings = await encode_texts(chunk_texts, model=model, prefix="passage: ")
-
-
-        await hard_delete_by_link_id(link_id)
-        await store_chunks(
-            link_id=link_id,
-            url=url,
-            title=title,
-            chunks=chunks,
-            embeddings=embeddings,
-            metadata=base_metadata
+        paragraph_count = _count_paragraphs(clean_content)
+        content_hash = _content_hash(clean_content)
+        scraped_at = _utcnow_iso()
+        _log_stage(
+            web_bank_id,
+            "hash",
+            "Hash konten berhasil dihitung",
+            job_id=job_id,
+            started_at=started_at,
+            paragraph_count=paragraph_count,
+            content_hash=content_hash[:12],
         )
 
+        previous_hash = existing_state.get("last_content_hash")
+        previous_chunks = int(existing_state.get("chunks_count") or 0)
+        _log_stage(
+            web_bank_id,
+            "dedup",
+            "Membandingkan hash dengan scrape sukses terakhir",
+            job_id=job_id,
+            started_at=started_at,
+            previous_hash=(previous_hash[:12] if previous_hash else "-"),
+            previous_chunks=previous_chunks,
+        )
+        if previous_hash and previous_hash == content_hash:
+            restored_chunks = 0
+            if was_inactive:
+                restored_chunks = await restore_chunks_by_web_bank_id(web_bank_id, is_active=is_active)
+            updated_chunks = await update_chunk_metadata(
+                web_bank_id,
+                name=name,
+                opd_id=opd_id,
+                url=url,
+                title=title,
+                is_active=is_active,
+            )
+            result = {
+                "status": "success",
+                "web_bank_id": web_bank_id,
+                "url": url,
+                "title": title,
+                "page_count": 1,
+                "paragraph_count": paragraph_count,
+                "chunks_count": previous_chunks,
+                "content_hash": content_hash,
+                "dedup_skipped": True,
+                "restored_chunks": restored_chunks,
+                "updated_chunks": updated_chunks,
+            }
+            await upsert_web_state(
+                web_bank_id,
+                {
+                    "name": name,
+                    "opd_id": opd_id,
+                    "url": url,
+                    "css_selector": css_selector,
+                    "scrape_interval": scrape_interval,
+                    "title": title,
+                    "is_active": is_active,
+                    "last_scrape_status": "scraped",
+                    "last_scrape_message": "Konten tidak berubah, indeks tidak diperbarui.",
+                    "last_scraped_at": scraped_at,
+                    "last_success_at": existing_state.get("last_success_at") or scraped_at,
+                    "last_content_hash": content_hash,
+                    "indexed_url": url,
+                    "indexed_css_selector": css_selector,
+                    "paragraph_count": paragraph_count,
+                    "chunks_count": previous_chunks,
+                    "metadata": metadata or existing_state.get("metadata") or {},
+                },
+            )
+            _log_stage(
+                web_bank_id,
+                "dedup",
+                "Konten tidak berubah, re-index dilewati",
+                job_id=job_id,
+                started_at=started_at,
+                paragraph_count=paragraph_count,
+                chunks_count=previous_chunks,
+                restored_chunks=restored_chunks,
+            )
+            await _send_callback_once(
+                sent_callbacks,
+                web_bank_id,
+                url,
+                "completed",
+                result,
+                job_id=job_id,
+                started_at=started_at,
+            )
+            _log_stage(
+                web_bank_id,
+                "done",
+                "Pipeline selesai dengan dedup skip",
+                job_id=job_id,
+                started_at=started_at,
+            )
+            return result
+
+        _log_stage(
+            web_bank_id,
+            "chunking",
+            "Mengekstrak block HTML dan menyusun parent-child chunk",
+            job_id=job_id,
+            started_at=started_at,
+        )
+        chunk_items = web_chunker.chunk_html(raw_html, css_selector=css_selector)
+        parent_chunks = [item for item in chunk_items if item.chunk_level == "parent"]
+        child_chunks = [item for item in chunk_items if item.chunk_level == "child"]
+        if not child_chunks:
+            raise Exception("tidak ada chunk yang berhasil dibuat")
+        _log_stage(
+            web_bank_id,
+            "chunking",
+            "Chunking selesai",
+            job_id=job_id,
+            started_at=started_at,
+            parent_chunks=len(parent_chunks),
+            chunks_count=len(child_chunks),
+        )
+
+        chunk_texts = [chunk.text for chunk in child_chunks]
+        _log_stage(
+            web_bank_id,
+            "embedding",
+            "Membuat embedding untuk seluruh child chunk",
+            job_id=job_id,
+            started_at=started_at,
+            chunks_count=len(chunk_texts),
+        )
+        embeddings = await encode_texts(chunk_texts, model=model, prefix="passage: ")
+        _log_stage(
+            web_bank_id,
+            "embedding",
+            "Embedding selesai dibuat",
+            job_id=job_id,
+            started_at=started_at,
+            embedding_count=len(embeddings),
+        )
+
+        _log_stage(
+            web_bank_id,
+            "cleanup",
+            "Menghapus chunk lama sebelum upsert baru",
+            job_id=job_id,
+            started_at=started_at,
+        )
+        await hard_delete_by_web_bank_id(web_bank_id)
+        _log_stage(
+            web_bank_id,
+            "upsert",
+            "Menyimpan parent dan child chunk baru ke Qdrant",
+            job_id=job_id,
+            started_at=started_at,
+            parent_chunks=len(parent_chunks),
+            chunks_count=len(child_chunks),
+        )
+        await store_chunks(
+            web_bank_id=web_bank_id,
+            name=name,
+            opd_id=opd_id,
+            url=url,
+            title=title,
+            parent_chunks=parent_chunks,
+            child_chunks=child_chunks,
+            child_embeddings=embeddings,
+            content_hash=content_hash,
+            scraped_at=scraped_at,
+            is_active=is_active,
+            metadata={
+                **(metadata or {}),
+                "css_selector": css_selector,
+                "scrape_interval": scrape_interval,
+            },
+        )
 
         result = {
             "status": "success",
-            "link_id": link_id,
+            "web_bank_id": web_bank_id,
             "url": url,
             "title": title,
-            "chunks_count": len(chunks),
-            "content_length": sum(len(c.content) for c in chunks),
-            "content_type": content_type,
+            "page_count": 1,
+            "paragraph_count": paragraph_count,
+            "chunks_count": len(child_chunks),
+            "content_length": sum(len(chunk.text) for chunk in child_chunks),
+            "content_hash": content_hash,
+            "dedup_skipped": False,
         }
-        if content_type == "faq" and "faq_pairs_count" in base_metadata:
-            result["faq_pairs_count"] = base_metadata["faq_pairs_count"]
 
-        logger.info(
-            f"[SYNC] Selesai: {len(chunks)} chunks untuk link_id={link_id} "
-            f"(content_type={content_type})"
+        await upsert_web_state(
+            web_bank_id,
+            {
+                "name": name,
+                "opd_id": opd_id,
+                "url": url,
+                "css_selector": css_selector,
+                "scrape_interval": scrape_interval,
+                "title": title,
+                "is_active": is_active,
+                "last_scrape_status": "scraped",
+                "last_scrape_message": (
+                    f"Halaman berhasil di-scrape. Total konten: 1 halaman, "
+                    f"{paragraph_count} paragraf, {len(child_chunks)} chunk"
+                ),
+                "last_scraped_at": scraped_at,
+                "last_success_at": scraped_at,
+                "last_content_hash": content_hash,
+                "indexed_url": url,
+                "indexed_css_selector": css_selector,
+                "paragraph_count": paragraph_count,
+                "chunks_count": len(child_chunks),
+                "metadata": metadata or {},
+            },
+        )
+        _log_stage(
+            web_bank_id,
+            "state",
+            "State scrape terakhir berhasil diperbarui",
+            job_id=job_id,
+            started_at=started_at,
+            content_hash=content_hash[:12],
+            paragraph_count=paragraph_count,
+            chunks_count=len(child_chunks),
         )
 
-        await send_callback(link_id, url, "completed", result, callback_url)
+        logger.info(
+            f"[SYNC] Selesai: {len(parent_chunks)} parent + {len(child_chunks)} child chunks "
+            f"untuk web_bank_id={web_bank_id} (paragraphs={paragraph_count})"
+        )
+        await _send_callback_once(
+            sent_callbacks,
+            web_bank_id,
+            url,
+            "completed",
+            result,
+            job_id=job_id,
+            started_at=started_at,
+        )
+        _log_stage(
+            web_bank_id,
+            "done",
+            "Pipeline scraping selesai",
+            job_id=job_id,
+            started_at=started_at,
+            paragraph_count=paragraph_count,
+            chunks_count=len(child_chunks),
+        )
         return result
 
-    except Exception as e:
-        logger.exception(f"[SYNC] Error processing URL link_id={link_id}: {e}")
+    except Exception as exc:
+        logger.exception(f"[SYNC] Error processing URL web_bank_id={web_bank_id}: {exc}")
+        failed_at = _utcnow_iso()
+        error_message = str(exc).strip() or "URL tidak dapat dijangkau"
+        if "timeout" in error_message.lower():
+            error_message = (
+                f"timeout setelah {config.SCRAPING_TIMEOUT} detik atau URL tidak dapat dijangkau"
+            )
+
+        await upsert_web_state(
+            web_bank_id,
+            {
+                "name": name,
+                "opd_id": opd_id,
+                "url": url,
+                "css_selector": css_selector,
+                "scrape_interval": scrape_interval,
+                "is_active": is_active,
+                "last_scrape_status": "failed",
+                "last_scrape_message": f"Gagal mengakses halaman web: {error_message}",
+                "last_scraped_at": failed_at,
+                "metadata": metadata or existing_state.get("metadata") or {},
+            },
+        )
+
         error_result = {
             "status": "failed",
-            "link_id": link_id,
+            "web_bank_id": web_bank_id,
             "url": url,
-            "error": str(e),
+            "error": error_message,
         }
-        await send_callback(link_id, url, "failed", error_result, callback_url)
+        _log_stage(
+            web_bank_id,
+            "failed",
+            "Pipeline scraping gagal",
+            job_id=job_id,
+            started_at=started_at,
+            level="error",
+            error=error_message,
+        )
+        await _send_callback_once(
+            sent_callbacks,
+            web_bank_id,
+            url,
+            "failed",
+            error_result,
+            job_id=job_id,
+            started_at=started_at,
+        )
         return error_result
+
+    finally:
+        release_job(web_bank_id)
+        _log_stage(
+            web_bank_id,
+            "finalize",
+            "Slot scraping dilepas",
+            job_id=job_id,
+            started_at=started_at,
+        )
+
+
+async def update_web_bank(
+    web_bank_id: str,
+    name: str,
+    opd_id: str,
+    url: str,
+    css_selector: Optional[str] = None,
+    scrape_interval: Optional[int] = None,
+    is_active: bool = True,
+    metadata: Optional[Dict[str, Any]] = None,
+    background_tasks: Any = None,
+) -> Dict[str, Any]:
+    """Update metadata and only rescrape when source settings changed."""
+    existing_state = await get_web_state(web_bank_id) or {}
+    existing_chunks = await get_chunks_by_web_bank_id(web_bank_id, include_deleted=True, chunk_level="child")
+
+    if not existing_state and not existing_chunks:
+        return {
+            "status": "not_found",
+            "web_bank_id": web_bank_id,
+            "message": "Web bank tidak ditemukan",
+        }
+
+    sample = existing_state or (existing_chunks[0] if existing_chunks else {})
+    indexed_url = _normalize_optional_text(existing_state.get("indexed_url") or sample.get("url"))
+    indexed_selector = _normalize_optional_text(existing_state.get("indexed_css_selector") or sample.get("css_selector"))
+    new_url = _normalize_optional_text(url)
+    new_selector = _normalize_optional_text(css_selector)
+    has_indexed_content = bool(existing_chunks) or bool(existing_state.get("last_content_hash"))
+    source_changed = (not has_indexed_content) or (indexed_url != new_url) or (indexed_selector != new_selector)
+    metadata_updates = metadata if metadata is not None else existing_state.get("metadata") or {}
+
+    if not is_active:
+        updated_chunks = await update_chunk_metadata(
+            web_bank_id,
+            name=name,
+            opd_id=opd_id,
+            is_active=False,
+        )
+        await upsert_web_state(
+            web_bank_id,
+            {
+                "name": name,
+                "opd_id": opd_id,
+                "url": url,
+                "title": sample.get("title"),
+                "css_selector": css_selector,
+                "scrape_interval": scrape_interval,
+                "is_active": False,
+                "last_scrape_status": existing_state.get("last_scrape_status", "inactive"),
+                "last_scrape_message": "Web bank dinonaktifkan. Data tidak ikut domain pencarian RAG.",
+                "metadata": metadata_updates,
+            },
+        )
+        logger.info(
+            f"[UPDATE] Web bank set inactive for web_bank_id={web_bank_id} "
+            f"(updated_chunks={updated_chunks})"
+        )
+        return {
+            "status": "success",
+            "web_bank_id": web_bank_id,
+            "message": "Web bank berhasil dinonaktifkan tanpa menghapus data",
+            "updated_chunks": updated_chunks,
+        }
+
+    if source_changed:
+        if background_tasks is None:
+            return {
+                "status": "error",
+                "web_bank_id": web_bank_id,
+                "message": "Background task handler tidak tersedia untuk rescrape",
+            }
+        if not reserve_job(web_bank_id):
+            return {
+                "status": "skipped",
+                "message": "Scraping untuk website ini masih berjalan",
+                "web_bank_id": web_bank_id,
+            }
+
+        job_id = f"update-{web_bank_id}-{int(time.time())}"
+        background_tasks.add_task(
+            process_url,
+            web_bank_id=web_bank_id,
+            name=name,
+            opd_id=opd_id,
+            url=url,
+            css_selector=css_selector,
+            scrape_interval=scrape_interval,
+            is_active=True,
+            metadata=metadata,
+            job_id=job_id,
+        )
+        logger.info(
+            f"[UPDATE] Source changed for web_bank_id={web_bank_id}; scheduling rescrape "
+            f"(url_changed={indexed_url != new_url}, css_changed={indexed_selector != new_selector})"
+        )
+        return {
+            "status": "processing",
+            "web_bank_id": web_bank_id,
+            "job_id": job_id,
+            "message": "Perubahan URL/CSS selector terdeteksi, scraping ulang dijalankan",
+        }
+
+    title = sample.get("title")
+    updated_chunks = await update_chunk_metadata(
+        web_bank_id,
+        name=name,
+        opd_id=opd_id,
+        title=title,
+        is_active=True,
+    )
+    if existing_state.get("is_active") is False:
+        await restore_chunks_by_web_bank_id(web_bank_id, is_active=True)
+
+    await upsert_web_state(
+        web_bank_id,
+        {
+            "name": name,
+            "opd_id": opd_id,
+            "url": url,
+            "title": title,
+            "css_selector": css_selector,
+            "scrape_interval": scrape_interval,
+            "is_active": True,
+            "last_scrape_status": existing_state.get("last_scrape_status", "scraped"),
+            "last_scrape_message": "Metadata web bank berhasil diperbarui tanpa scraping ulang.",
+            "indexed_url": existing_state.get("indexed_url") or sample.get("url"),
+            "indexed_css_selector": existing_state.get("indexed_css_selector") or sample.get("css_selector"),
+            "metadata": metadata_updates,
+        },
+    )
+    logger.info(
+        f"[UPDATE] Metadata updated without rescrape for web_bank_id={web_bank_id} "
+        f"(updated_chunks={updated_chunks})"
+    )
+    return {
+        "status": "success",
+        "web_bank_id": web_bank_id,
+        "message": "Metadata web bank berhasil diperbarui tanpa scraping ulang",
+        "updated_chunks": updated_chunks,
+    }
+
+
+async def soft_delete_web_bank(web_bank_id: str) -> Dict[str, Any]:
+    """Soft delete a web bank and its indexed chunks."""
+    _log_stage(web_bank_id, "delete", "Melakukan soft delete web bank")
+    deleted_chunks = await soft_delete_by_web_bank_id(web_bank_id)
+    existing_state = await get_web_state(web_bank_id) or {}
+    await upsert_web_state(
+        web_bank_id,
+        {
+            "name": existing_state.get("name"),
+            "opd_id": existing_state.get("opd_id"),
+            "url": existing_state.get("url"),
+            "css_selector": existing_state.get("css_selector"),
+            "scrape_interval": existing_state.get("scrape_interval"),
+            "is_active": False,
+            "last_scrape_status": "deleted",
+            "last_scrape_message": "Web bank dihapus dari WA manajemen (soft delete).",
+            "metadata": existing_state.get("metadata") or {},
+        },
+    )
+
+    return {
+        "status": "success",
+        "web_bank_id": web_bank_id,
+        "deleted_chunks": deleted_chunks,
+        "message": "Web bank berhasil di-soft-delete",
+    }
+
+
+async def disable_web_bank(web_bank_id: str) -> Dict[str, Any]:
+    """Backward-compatible alias for soft delete flow."""
+    return await soft_delete_web_bank(web_bank_id)
 
 
 async def sync_edited_content(
-    link_id: str,
-    edited_content: str
+    web_bank_id: str,
+    edited_content: str,
 ) -> Dict[str, Any]:
     """Sync edited content (user-edited)."""
+    started_at = time.monotonic()
     try:
-        logger.info(f"[SYNC] Syncing edited content for link_id={link_id}")
-        
-        # Get existing data untuk URL dan title
-        existing_chunks = await get_chunks_by_link_id(link_id, include_deleted=True)
-        
-        if not existing_chunks:
+        logger.info(f"[SYNC] Syncing edited content for web_bank_id={web_bank_id}")
+        _log_stage(
+            web_bank_id,
+            "edit_sync",
+            "Memulai sinkronisasi konten hasil edit",
+            started_at=started_at,
+        )
+        existing_chunks = await get_chunks_by_web_bank_id(web_bank_id, include_deleted=True)
+        existing_state = await get_web_state(web_bank_id) or {}
+
+        if not existing_chunks and not existing_state:
             return {
                 "status": "not_found",
-                "link_id": link_id,
-                "error": "Content not found"
+                "web_bank_id": web_bank_id,
+                "error": "Content not found",
             }
-        
-        url = existing_chunks[0].get("url", "")
-        title = existing_chunks[0].get("title", "")
-        
-        # Chunk new content
-        chunks = chunker.chunk(edited_content, url)
-        if not chunks:
+
+        sample = existing_chunks[0] if existing_chunks else existing_state
+        url = sample.get("url", "")
+        title = sample.get("title", "")
+        name = sample.get("name", existing_state.get("name", ""))
+        opd_id = sample.get("opd_id", existing_state.get("opd_id", ""))
+        is_active = existing_state.get("is_active", sample.get("is_active", True))
+
+        clean_content = (edited_content or "").strip()
+        _log_stage(
+            web_bank_id,
+            "edit_sync",
+            "Menyusun parent-child chunk dari konten hasil edit",
+            started_at=started_at,
+            clean_chars=len(clean_content),
+        )
+        chunk_items = web_chunker.chunk_text(clean_content)
+        parent_chunks = [item for item in chunk_items if item.chunk_level == "parent"]
+        child_chunks = [item for item in chunk_items if item.chunk_level == "child"]
+        if not child_chunks:
             return {
                 "status": "error",
-                "link_id": link_id,
-                "error": "No chunks created from edited content"
+                "web_bank_id": web_bank_id,
+                "error": "No chunks created from edited content",
             }
-        
-        # Embed
-        chunk_texts = [chunk.content for chunk in chunks]
+
+        chunk_texts = [chunk.text for chunk in child_chunks]
+        _log_stage(
+            web_bank_id,
+            "edit_sync",
+            "Membuat embedding untuk child chunk hasil edit",
+            started_at=started_at,
+            chunks_count=len(chunk_texts),
+        )
         embeddings = await encode_texts(chunk_texts, model=model, prefix="passage: ")
-        
-        # Delete old dan store new
-        await hard_delete_by_link_id(link_id)
+        content_hash = _content_hash(clean_content)
+        paragraph_count = _count_paragraphs(clean_content)
+        scraped_at = _utcnow_iso()
+
+        _log_stage(
+            web_bank_id,
+            "edit_sync",
+            "Mengganti chunk lama dengan hasil edit",
+            started_at=started_at,
+            parent_chunks=len(parent_chunks),
+            chunks_count=len(child_chunks),
+        )
+        await hard_delete_by_web_bank_id(web_bank_id)
         await store_chunks(
-            link_id=link_id,
+            web_bank_id=web_bank_id,
+            name=name,
+            opd_id=opd_id,
             url=url,
             title=title,
-            chunks=chunks,
-            embeddings=embeddings,
-            metadata={"is_edited": True, "edited_at": datetime.utcnow().isoformat()}
+            parent_chunks=parent_chunks,
+            child_chunks=child_chunks,
+            child_embeddings=embeddings,
+            content_hash=content_hash,
+            scraped_at=scraped_at,
+            is_active=is_active,
+            metadata={"is_edited": True, "edited_at": scraped_at},
         )
-        
-        logger.info(f"[SYNC] Updated: {len(chunks)} chunks for link_id={link_id}")
-        
+
+        await upsert_web_state(
+            web_bank_id,
+            {
+                "name": name,
+                "opd_id": opd_id,
+                "url": url,
+                "title": title,
+                "is_active": is_active,
+                "last_scrape_status": "scraped",
+                "last_scrape_message": "Konten hasil edit berhasil disinkronkan.",
+                "last_scraped_at": scraped_at,
+                "last_success_at": scraped_at,
+                "last_content_hash": content_hash,
+                "indexed_url": url,
+                "indexed_css_selector": existing_state.get("css_selector"),
+                "paragraph_count": paragraph_count,
+                "chunks_count": len(child_chunks),
+                "metadata": {"is_edited": True, "edited_at": scraped_at},
+            },
+        )
+
+        logger.info(
+            f"[SYNC] Updated: {len(parent_chunks)} parent + {len(child_chunks)} child chunks "
+            f"for web_bank_id={web_bank_id}"
+        )
+        _log_stage(
+            web_bank_id,
+            "edit_sync",
+            "Sinkronisasi konten hasil edit selesai",
+            started_at=started_at,
+            paragraph_count=paragraph_count,
+            chunks_count=len(child_chunks),
+        )
         return {
             "status": "success",
-            "link_id": link_id,
-            "chunks_count": len(chunks)
+            "web_bank_id": web_bank_id,
+            "chunks_count": len(child_chunks),
         }
-        
-    except Exception as e:
-        logger.exception(f"[SYNC] Error syncing edited content: {e}")
+
+    except Exception as exc:
+        logger.exception(f"[SYNC] Error syncing edited content: {exc}")
+        _log_stage(
+            web_bank_id,
+            "edit_sync_failed",
+            "Sinkronisasi konten hasil edit gagal",
+            started_at=started_at,
+            level="error",
+            error=str(exc),
+        )
         return {
             "status": "error",
-            "link_id": link_id,
-            "error": str(e)
+            "web_bank_id": web_bank_id,
+            "error": str(exc),
         }
 
 
-async def get_content(link_id: str) -> Dict[str, Any]:
-    """Get combined content by link_id."""
-    chunks = await get_chunks_by_link_id(link_id)
-    
+async def get_content(web_bank_id: str) -> Dict[str, Any]:
+    """Get combined content by web_bank_id."""
+    chunks = await get_chunks_by_web_bank_id(web_bank_id, chunk_level="child")
     if not chunks:
         return {
             "status": "not_found",
-            "link_id": link_id
+            "web_bank_id": web_bank_id,
         }
-    
-    # Combine chunks
-    clean_content = "\n\n".join([c.get("content", "") for c in chunks])
-    
+
+    clean_content = "\n\n".join(chunk.get("content", "") for chunk in chunks)
+    sample = chunks[0]
     return {
         "status": "success",
-        "link_id": link_id,
-        "url": chunks[0].get("url", ""),
-        "title": chunks[0].get("title", ""),
+        "web_bank_id": web_bank_id,
+        "url": sample.get("url", ""),
+        "title": sample.get("title", ""),
         "clean_content": clean_content,
         "chunks_count": len(chunks),
-        "created_at": chunks[0].get("created_at", ""),
-        "updated_at": chunks[0].get("updated_at", "")
+        "created_at": sample.get("created_at", ""),
+        "updated_at": sample.get("updated_at", ""),
     }

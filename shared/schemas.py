@@ -83,8 +83,12 @@ class DocumentInfo(BaseModel):
 
 class WebInfo(BaseModel):
     """Info web sumber."""
+    web_bank_id: str = ""
+    name: str = ""
+    opd_id: str = ""
     url: str = ""
     title: str = ""
+    is_active: bool = True
     link_id: str = ""
 
 
@@ -150,7 +154,10 @@ class DocSyncRequest(BaseModel):
     """Request untuk sync document."""
     doc_id: str
     opd_name: Optional[str] = None
+    organization_id: Optional[str] = None
+    filename: Optional[str] = None
     file_url: str
+    is_active: bool = True
 
 
 class DocDeleteRequest(BaseModel):
@@ -162,21 +169,31 @@ class DocDeleteRequest(BaseModel):
 
 class WebTriggerRequest(BaseModel):
     """Request untuk trigger web scraping."""
-    link_id: str = Field(..., description="Unique ID dari link")
+    web_bank_id: str = Field(..., description="Unique ID dari web bank")
+    name: str = Field(..., description="Nama website")
+    opd_id: str = Field(..., description="ID OPD pemilik website")
     url: str = Field(..., description="URL yang akan di-scrape")
-    callback_url: Optional[str] = Field(None, description="Custom callback URL")
+    css_selector: Optional[str] = Field(None, description="CSS selector untuk target konten spesifik")
+    scrape_interval: Optional[int] = Field(None, description="Interval scrape dalam jam")
+    is_active: bool = Field(True, description="Apakah web bank aktif dan searchable")
     metadata: Optional[dict] = Field(default_factory=dict)
 
 
-class WebSyncRequest(BaseModel):
-    """Request untuk sync edited web content."""
-    link_id: str = Field(..., description="ID link")
-    edited_content: str = Field(..., description="Konten hasil edit")
+class WebUpdateRequest(BaseModel):
+    """Request untuk update metadata web bank."""
+    web_bank_id: str = Field(..., description="Unique ID dari web bank")
+    name: str = Field(..., description="Nama website")
+    opd_id: str = Field(..., description="ID OPD pemilik website")
+    url: str = Field(..., description="URL website")
+    css_selector: Optional[str] = Field(None, description="CSS selector target konten spesifik")
+    scrape_interval: Optional[int] = Field(None, description="Interval scrape dalam jam")
+    is_active: bool = Field(True, description="Apakah web bank aktif dan searchable")
+    metadata: Optional[dict] = Field(default_factory=dict)
 
 
 class WebDeleteRequest(BaseModel):
     """Request untuk delete web content."""
-    link_id: str = Field(..., description="ID link yang akan dihapus")
+    web_bank_id: str = Field(..., description="ID web bank yang akan dihapus")
 
 
 # ============== SYNC MODELS (USULAN) ==============

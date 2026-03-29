@@ -27,6 +27,49 @@ def set_instances(embedding_model: SentenceTransformer, qdrant_client: AsyncQdra
     qdrant = qdrant_client
 
 
+async def _retrieve_payloads_by_ids(point_ids: List[str]) -> Dict[str, Dict[str, Any]]:
+    valid_ids = [point_id for point_id in point_ids if point_id]
+    if not valid_ids:
+        return {}
+    points = await qdrant.retrieve(
+        collection_name=config.COLLECTION_DOCUMENT,
+        ids=valid_ids,
+        with_payload=True,
+        with_vectors=False,
+    )
+    return {str(point.id): dict(point.payload or {}) for point in points}
+
+
+async def _expand_document_context(payload: Dict[str, Any]) -> str:
+    """Expand context around a child chunk using parent or adjacent siblings."""
+    text = payload.get("text", "") or ""
+    if not config.RETRIEVAL_CONTEXT_EXPANSION:
+        return format_for_display(text)
+
+    point_ids = [
+        payload.get("parent_chunk_id"),
+        payload.get("window_prev_id"),
+        payload.get("window_next_id"),
+    ]
+    related_payloads = await _retrieve_payloads_by_ids(point_ids)
+    parent_payload = related_payloads.get(str(payload.get("parent_chunk_id")))
+
+    if parent_payload and len(text) < 450:
+        return format_for_display(parent_payload.get("text", text))
+
+    parts = []
+    prev_payload = related_payloads.get(str(payload.get("window_prev_id")))
+    next_payload = related_payloads.get(str(payload.get("window_next_id")))
+    if prev_payload:
+        parts.append(prev_payload.get("text", ""))
+    parts.append(text)
+    if next_payload:
+        parts.append(next_payload.get("text", ""))
+
+    expanded = "\n\n".join(part for part in parts if part and part.strip())
+    return format_for_display(expanded or text)
+
+
 async def search_document_bank(
     query: str,
     limit: int = 5,
@@ -41,6 +84,13 @@ async def search_document_bank(
         qdrant_hits = await qdrant.query_points(
             collection_name=config.COLLECTION_DOCUMENT,
             query=query_vector,
+            query_filter=qdrant_models.Filter(
+                must=[
+                    qdrant_models.FieldCondition(key="is_active", match=qdrant_models.MatchValue(value=True)),
+                    qdrant_models.FieldCondition(key="is_deleted", match=qdrant_models.MatchValue(value=False)),
+                    qdrant_models.FieldCondition(key="chunk_level", match=qdrant_models.MatchValue(value="child")),
+                ]
+            ),
             limit=limit
         )
 
@@ -52,15 +102,18 @@ async def search_document_bank(
             payload = getattr(point, "payload", {}) or point.get("payload", {})
             score = getattr(point, "score", 0.0)
 
+            expanded_text = await _expand_document_context(payload)
             search_results.append({
                 "doc_id": payload.get("mysql_id"),
-                "opd": payload.get("opd"),
+                "opd": payload.get("opd") or payload.get("organization_id"),
                 "filename": payload.get("filename"),
-                "page_number": payload.get("page_number"),
+                "page_number": payload.get("page_start") or payload.get("page_number"),
                 "chunk_index": payload.get("chunk_index"),
-                "section": payload.get("section"),
+                "section": payload.get("section_title") or payload.get("section"),
+                "heading_path": payload.get("heading_path"),
+                "chunk_level": payload.get("chunk_level"),
                 "summary": payload.get("summary"),
-                "text": payload.get("text"),
+                "text": expanded_text,
                 "score": float(score)
             })
 
@@ -134,7 +187,11 @@ async def search_document_unified(
             collection_name=config.COLLECTION_DOCUMENT,
             query=query_vector,
             query_filter=qdrant_models.Filter(
-                must=[qdrant_models.FieldCondition(key="is_deleted", match=qdrant_models.MatchValue(value=False))]
+                must=[
+                    qdrant_models.FieldCondition(key="is_active", match=qdrant_models.MatchValue(value=True)),
+                    qdrant_models.FieldCondition(key="is_deleted", match=qdrant_models.MatchValue(value=False)),
+                    qdrant_models.FieldCondition(key="chunk_level", match=qdrant_models.MatchValue(value="child")),
+                ]
             ),
             limit=top_k * 2  # Fetch lebih banyak untuk filtering
         )
@@ -172,7 +229,7 @@ async def search_document_unified(
             result_item = hit[0] if isinstance(hit, tuple) else hit
             payload = getattr(result_item, "payload", {}) or result_item.get("payload", {})
             score = float(getattr(result_item, "score", 0.0))
-            document_text = payload.get("text", "")
+            document_text = await _expand_document_context(payload)
             
             if score >= 0.4 and document_text:
                 if score >= 0.85:
@@ -196,9 +253,11 @@ async def search_document_unified(
                     "content_for_check": document_text[:2000],
                     "document_info": {
                         "filename": payload.get("filename", "-"),
-                        "page_number": payload.get("page_number", "-"),
-                        "opd": payload.get("opd", "-"),
-                        "doc_id": payload.get("mysql_id", "-")
+                        "page_number": payload.get("page_start", payload.get("page_number", "-")),
+                        "opd": payload.get("opd", payload.get("organization_id", "-")),
+                        "doc_id": payload.get("mysql_id", "-"),
+                        "section_title": payload.get("section_title", payload.get("section", "-")),
+                        "heading_path": payload.get("heading_path", "-"),
                     }
                 })
         

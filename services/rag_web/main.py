@@ -24,7 +24,7 @@ from shared.logging_config import setup_logging
 from services.rag_web import search as search_module
 from services.rag_web import sync as sync_module
 from services.rag_web.models import (
-    SearchRequest, UnifiedSearchRequest, TriggerRequest, SyncRequest, 
+    SearchRequest, UnifiedSearchRequest, TriggerRequest, UpdateRequest, SyncRequest,
     DeleteRequest, GetContentRequest
 )
 
@@ -34,6 +34,76 @@ _model: SentenceTransformer = None
 _model_lock = asyncio.Lock()
 _last_model_used: float = 0.0
 qdrant: AsyncQdrantClient = None
+
+
+async def _ensure_payload_index(collection_name: str, field_name: str, field_schema) -> None:
+    """Best-effort payload index creation."""
+    try:
+        await qdrant.create_payload_index(
+            collection_name=collection_name,
+            field_name=field_name,
+            field_schema=field_schema
+        )
+    except Exception as exc:
+        logger.debug(
+            f"Skip/create payload index failed for {collection_name}.{field_name}: {exc}"
+        )
+
+
+async def _backfill_is_active(collection_name: str) -> None:
+    """Backfill missing is_active payload for legacy points."""
+    try:
+        offset = None
+        updated_active = 0
+        updated_inactive = 0
+        while True:
+            points, next_offset = await qdrant.scroll(
+                collection_name=collection_name,
+                limit=256,
+                offset=offset,
+                with_payload=True,
+                with_vectors=False,
+            )
+            if not points:
+                break
+
+            active_ids = []
+            inactive_ids = []
+            for point in points:
+                payload = dict(point.payload or {})
+                if "is_active" in payload:
+                    continue
+                if payload.get("is_deleted", False):
+                    inactive_ids.append(point.id)
+                else:
+                    active_ids.append(point.id)
+
+            if active_ids:
+                await qdrant.set_payload(
+                    collection_name=collection_name,
+                    payload={"is_active": True},
+                    points=active_ids,
+                )
+                updated_active += len(active_ids)
+            if inactive_ids:
+                await qdrant.set_payload(
+                    collection_name=collection_name,
+                    payload={"is_active": False},
+                    points=inactive_ids,
+                )
+                updated_inactive += len(inactive_ids)
+
+            if next_offset is None:
+                break
+            offset = next_offset
+
+        if updated_active or updated_inactive:
+            logger.info(
+                f"Backfilled is_active on {collection_name}: "
+                f"active={updated_active}, inactive={updated_inactive}"
+            )
+    except Exception as exc:
+        logger.warning(f"Backfill is_active skipped for {collection_name}: {exc}")
 
 
 async def get_model() -> SentenceTransformer:
@@ -112,18 +182,68 @@ async def init_qdrant():
                     distance=Distance.COSINE
                 )
             )
-            
-            # Create indexes
-            await qdrant.create_payload_index(
-                collection_name=config.COLLECTION_WEB,
-                field_name="link_id",
-                field_schema=qdrant_models.PayloadSchemaType.KEYWORD
+
+        if config.COLLECTION_WEB_STATE not in collection_names:
+            logger.info(f"Creating collection: {config.COLLECTION_WEB_STATE}")
+            await qdrant.create_collection(
+                collection_name=config.COLLECTION_WEB_STATE,
+                vectors_config=VectorParams(
+                    size=1,
+                    distance=Distance.COSINE
+                )
             )
-            await qdrant.create_payload_index(
-                collection_name=config.COLLECTION_WEB,
-                field_name="is_deleted",
-                field_schema=qdrant_models.PayloadSchemaType.BOOL
-            )
+
+        await _ensure_payload_index(
+            config.COLLECTION_WEB,
+            "web_bank_id",
+            qdrant_models.PayloadSchemaType.KEYWORD
+        )
+        await _ensure_payload_index(
+            config.COLLECTION_WEB,
+            "link_id",
+            qdrant_models.PayloadSchemaType.KEYWORD
+        )
+        await _ensure_payload_index(
+            config.COLLECTION_WEB,
+            "opd_id",
+            qdrant_models.PayloadSchemaType.KEYWORD
+        )
+        await _ensure_payload_index(
+            config.COLLECTION_WEB,
+            "is_deleted",
+            qdrant_models.PayloadSchemaType.BOOL
+        )
+        await _ensure_payload_index(
+            config.COLLECTION_WEB,
+            "is_active",
+            qdrant_models.PayloadSchemaType.BOOL
+        )
+        await _ensure_payload_index(
+            config.COLLECTION_WEB,
+            "chunk_level",
+            qdrant_models.PayloadSchemaType.KEYWORD
+        )
+        await _ensure_payload_index(
+            config.COLLECTION_WEB,
+            "parent_chunk_id",
+            qdrant_models.PayloadSchemaType.KEYWORD
+        )
+        await _ensure_payload_index(
+            config.COLLECTION_WEB_STATE,
+            "web_bank_id",
+            qdrant_models.PayloadSchemaType.KEYWORD
+        )
+        await _ensure_payload_index(
+            config.COLLECTION_WEB_STATE,
+            "is_active",
+            qdrant_models.PayloadSchemaType.BOOL
+        )
+        await _ensure_payload_index(
+            config.COLLECTION_WEB_STATE,
+            "last_scrape_status",
+            qdrant_models.PayloadSchemaType.KEYWORD
+        )
+        await _backfill_is_active(config.COLLECTION_WEB)
     except Exception as e:
         logger.error(f"Qdrant init error: {e}")
     
@@ -215,61 +335,91 @@ async def internal_search_unified(request: UnifiedSearchRequest):
 async def internal_trigger(request: TriggerRequest, background_tasks: BackgroundTasks):
     """
     Trigger web scraping in background.
-    Semua opsi (CSS selector, JS renderer, FAQ mode, dll.) diteruskan ke sync_module.
     """
     await get_model()
     logger.info(
-        f"[TRIGGER] link_id={request.link_id}, url={request.url}, "
-        f"content_type={request.content_type}, css_selector={request.css_selector}, "
-        f"use_js_renderer={request.use_js_renderer}, force_rescrape={request.force_rescrape}"
+        f"[TRIGGER] web_bank_id={request.web_bank_id}, opd_id={request.opd_id}, "
+        f"url={request.url}, css_selector={request.css_selector}, "
+        f"scrape_interval={request.scrape_interval}, is_active={request.is_active}"
     )
 
-    # Rate limit per-domain
-    try:
-        from services.rag_web.rate_limiter import rate_limiter
-        await rate_limiter.wait_for_domain(request.url)
-    except Exception as e:
-        logger.warning(f"[TRIGGER] Rate limiter error (ignored): {e}")
+    if not request.is_active:
+        return await sync_module.register_inactive_web_bank(
+            web_bank_id=request.web_bank_id,
+            name=request.name,
+            opd_id=request.opd_id,
+            url=request.url,
+            css_selector=request.css_selector,
+            scrape_interval=request.scrape_interval,
+            metadata=request.metadata,
+        )
+
+    if not sync_module.reserve_job(request.web_bank_id):
+        logger.info(f"[TRIGGER] Duplicate in-flight scrape skipped: {request.web_bank_id}")
+        return {
+            "status": "skipped",
+            "message": "Scraping untuk website ini masih berjalan",
+            "web_bank_id": request.web_bank_id,
+        }
 
     job_id = str(uuid.uuid4())
 
     background_tasks.add_task(
         sync_module.process_url,
-        link_id=request.link_id,
+        web_bank_id=request.web_bank_id,
+        name=request.name,
+        opd_id=request.opd_id,
         url=request.url,
         css_selector=request.css_selector,
-        use_js_renderer=request.use_js_renderer,
-        wait_selector=request.wait_selector,
-        content_type=request.content_type,
-        faq_question_selector=request.faq_question_selector,
-        faq_answer_selector=request.faq_answer_selector,
-        force_rescrape=request.force_rescrape,
-        callback_url=request.callback_url,
+        scrape_interval=request.scrape_interval,
+        is_active=request.is_active,
         metadata=request.metadata,
+        job_id=job_id,
     )
 
     return {
         "status": "processing",
         "message": "Scraping job started",
-        "link_id": request.link_id,
+        "web_bank_id": request.web_bank_id,
         "job_id": job_id,
         "options": {
-            "content_type": request.content_type,
             "css_selector": request.css_selector,
-            "use_js_renderer": request.use_js_renderer,
-            "force_rescrape": request.force_rescrape,
+            "scrape_interval": request.scrape_interval,
         }
     }
+
+
+@app.put("/internal/update")
+async def internal_update(request: UpdateRequest, background_tasks: BackgroundTasks):
+    """Update web bank metadata and rescrape only if source settings changed."""
+    await get_model()
+    logger.info(
+        f"[UPDATE] web_bank_id={request.web_bank_id}, opd_id={request.opd_id}, "
+        f"url={request.url}, css_selector={request.css_selector}, "
+        f"scrape_interval={request.scrape_interval}, is_active={request.is_active}"
+    )
+
+    return await sync_module.update_web_bank(
+        web_bank_id=request.web_bank_id,
+        name=request.name,
+        opd_id=request.opd_id,
+        url=request.url,
+        css_selector=request.css_selector,
+        scrape_interval=request.scrape_interval,
+        is_active=request.is_active,
+        metadata=request.metadata,
+        background_tasks=background_tasks,
+    )
 
 
 @app.post("/internal/sync")
 async def internal_sync(request: SyncRequest):
     """Internal sync endpoint - untuk edited content."""
     await get_model()
-    logger.info(f"[SYNC] link_id={request.link_id}")
+    logger.info(f"[SYNC] web_bank_id={request.web_bank_id}")
     
     result = await sync_module.sync_edited_content(
-        link_id=request.link_id,
+        web_bank_id=request.web_bank_id,
         edited_content=request.edited_content
     )
     
@@ -281,27 +431,18 @@ async def internal_sync(request: SyncRequest):
 
 @app.delete("/internal/delete")
 async def internal_delete(request: DeleteRequest):
-    """Internal delete endpoint - soft delete."""
-    logger.info(f"[DELETE] link_id={request.link_id}")
+    """Internal delete endpoint - soft delete indexed chunks and deactivate state."""
+    logger.info(f"[DELETE] web_bank_id={request.web_bank_id}")
     
-    count = await sync_module.soft_delete_by_link_id(request.link_id)
-    
-    if count == 0:
-        raise HTTPException(status_code=404, detail="Content not found")
-    
-    return {
-        "status": "success",
-        "link_id": request.link_id,
-        "deleted_chunks": count
-    }
+    return await sync_module.soft_delete_web_bank(request.web_bank_id)
 
 
 @app.post("/internal/content")
 async def internal_get_content(request: GetContentRequest):
     """Internal get content endpoint."""
-    logger.info(f"[GET-CONTENT] link_id={request.link_id}")
+    logger.info(f"[GET-CONTENT] web_bank_id={request.web_bank_id}")
     
-    result = await sync_module.get_content(request.link_id)
+    result = await sync_module.get_content(request.web_bank_id)
     
     if result.get("status") == "not_found":
         raise HTTPException(status_code=404, detail="Content not found")

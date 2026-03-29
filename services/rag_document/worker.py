@@ -8,7 +8,6 @@ import os
 import re
 import sys
 import time
-import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, List, Optional, Tuple
@@ -28,11 +27,13 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 from config import config
 from shared.logging_config import setup_logging
 from shared.ocr_utils import (
+    build_blocks_from_extracted_pages,
     calculate_content_hash,
     calculate_file_hash,
+    extract_blocks_from_file,
     extract_text_from_file,
 )
-from services.rag_document.chunker import chunk_xlsx, semantic_chunk
+from services.rag_document.chunker import ChunkItem, structure_chunk_document
 
 logger = setup_logging("document_worker")
 
@@ -237,7 +238,13 @@ def check_duplicate_by_content_hash(
     return {"exists": False, "point": None, "is_deleted": False}
 
 
-def reactivate_document(qdrant: QdrantClient, collection_name: str, doc_id: str) -> int:
+def reactivate_document(
+    qdrant: QdrantClient,
+    collection_name: str,
+    doc_id: str,
+    *,
+    is_active: bool = True,
+) -> int:
     all_point_ids = []
     offset = None
     now = datetime.utcnow().isoformat()
@@ -265,7 +272,12 @@ def reactivate_document(qdrant: QdrantClient, collection_name: str, doc_id: str)
     if all_point_ids:
         qdrant.set_payload(
             collection_name=collection_name,
-            payload={"is_deleted": False, "deleted_at": None, "reactivated_at": now},
+            payload={
+                "is_active": is_active,
+                "is_deleted": False,
+                "deleted_at": None,
+                "reactivated_at": now,
+            },
             points=all_point_ids,
         )
         logger.info(f"[REACTIVATE] {len(all_point_ids)} chunk dipulihkan untuk doc_id={doc_id}")
@@ -273,45 +285,19 @@ def reactivate_document(qdrant: QdrantClient, collection_name: str, doc_id: str)
     return len(all_point_ids)
 
 
-def _extract_xlsx_rows(file_path: str):
-    import openpyxl
-
-    all_rows = []
-    try:
-        wb = openpyxl.load_workbook(file_path, data_only=True, read_only=True)
-        for sheet in wb.worksheets:
-            for row in sheet.iter_rows(values_only=True):
-                row_data = [str(c) if c is not None else "" for c in row]
-                all_rows.append(row_data)
-        wb.close()
-    except Exception as e:
-        logger.warning(f"[XLSX] Gagal ekstrak rows dari {file_path}: {e}")
-    return all_rows
-
-
 def _build_chunk_items(
     file_ext: str,
-    extracted_pages: dict,
+    blocks: List[dict],
     file_path: str,
-) -> List[dict]:
-    if file_ext in [".xlsx", ".xls"]:
-        rows = _extract_xlsx_rows(file_path)
-        chunks = chunk_xlsx(rows, rows_per_chunk=30, max_size=config.CHUNK_SIZE)
-        return [{"page_number": 1, "text": chunk} for chunk in chunks]
-
-    chunk_items: List[dict] = []
-    for page_number, page_text in sorted(extracted_pages.items(), key=lambda x: x[0]):
-        if not page_text or not page_text.strip():
-            continue
-        page_chunks = semantic_chunk(
-            page_text,
-            chunk_size=config.CHUNK_SIZE,
-            overlap=config.CHUNK_OVERLAP,
-        )
-        for chunk in page_chunks:
-            if chunk and chunk.strip():
-                chunk_items.append({"page_number": page_number, "text": chunk})
-    return chunk_items
+) -> List[ChunkItem]:
+    return structure_chunk_document(
+        blocks,
+        child_chunk_size=config.DOC_CHILD_CHUNK_SIZE,
+        parent_chunk_size=config.DOC_PARENT_CHUNK_SIZE,
+        overlap=config.DOC_CHUNK_OVERLAP,
+        enable_semantic_merge=config.ENABLE_SEMANTIC_MERGE and file_ext not in [".pdf", ".jpg", ".jpeg", ".png", ".xlsx", ".xls"],
+        similarity_threshold=config.SEMANTIC_MERGE_SIM_THRESHOLD,
+    )
 
 
 def _get_existing_doc_id(point: Optional[object]) -> Optional[str]:
@@ -403,6 +389,7 @@ def process_document(
     filename: Optional[str],
     file_url: str,
     collection_name: str,
+    is_active: bool = True,
     lang: str = "id",
     skip_dedup_check: bool = False,
 ) -> dict:
@@ -461,7 +448,7 @@ def process_document(
                 existing_doc_id = _get_existing_doc_id(dedup_result.get("point")) or doc_id
                 if dedup_result["is_deleted"]:
                     logger.info(f"[WORKER] file_hash match (soft-deleted) - reactivating doc_id={existing_doc_id}")
-                    n = reactivate_document(qdrant, collection_name, existing_doc_id)
+                    n = reactivate_document(qdrant, collection_name, existing_doc_id, is_active=is_active)
                     return {"status": "reactivated", "total_chunks": n, "message": ""}
                 logger.info("[WORKER] file_hash match (aktif) - duplicate, skip OCR")
                 return {"status": "duplicate", "total_chunks": 0, "message": ""}
@@ -490,21 +477,49 @@ def process_document(
                 existing_doc_id = _get_existing_doc_id(content_dedup.get("point")) or doc_id
                 if content_dedup["is_deleted"]:
                     logger.info(f"[WORKER] content_hash match (soft-deleted) - reactivating doc_id={existing_doc_id}")
-                    n = reactivate_document(qdrant, collection_name, existing_doc_id)
+                    n = reactivate_document(qdrant, collection_name, existing_doc_id, is_active=is_active)
                     return {"status": "reactivated", "total_chunks": n, "message": ""}
                 logger.info("[WORKER] content_hash match (aktif) - duplicate")
                 return {"status": "duplicate", "total_chunks": 0, "message": ""}
 
-        progress_callback("chunking", f"Chunking dokumen (ext={file_ext})...")
-        chunk_items = _build_chunk_items(file_ext, extracted_pages, local_file_path)
+        progress_callback("chunking", "Mengekstrak block terstruktur dokumen...")
+        if file_ext in [".pdf", ".txt", ".jpg", ".jpeg", ".png"]:
+            source_kind = "ocr" if file_ext in [".pdf", ".jpg", ".jpeg", ".png"] else "narrative"
+            structured_blocks = build_blocks_from_extracted_pages(
+                extracted_pages,
+                source_kind=source_kind,
+            )
+        else:
+            structured_blocks = extract_blocks_from_file(
+                local_file_path,
+                lang=lang,
+                progress_callback=progress_callback,
+            )
+        logger.info(f"[WORKER] Structured blocks: {len(structured_blocks)}")
+
+        progress_callback("chunking", f"Menyusun parent-child chunk (ext={file_ext})...")
+        chunk_items = _build_chunk_items(file_ext, structured_blocks, local_file_path)
         if not chunk_items:
             return {"status": "error", "message": "Tidak ada chunk yang berhasil dibuat dari konten dokumen."}
 
-        total_chunks = len(chunk_items)
-        logger.info(f"[WORKER] {total_chunks} chunk dibuat")
-        progress_callback("chunking", f"Chunking selesai: {total_chunks} chunk.", total_chunks=total_chunks)
+        parent_chunks = [item for item in chunk_items if item.chunk_level == "parent"]
+        child_chunks = [item for item in chunk_items if item.chunk_level == "child"]
+        total_chunks = len(child_chunks)
+        logger.info(
+            f"[WORKER] {len(parent_chunks)} parent chunk + {len(child_chunks)} child chunk dibuat"
+        )
+        progress_callback(
+            "chunking",
+            f"Chunking selesai: {len(parent_chunks)} parent, {len(child_chunks)} child chunk.",
+            total_chunks=total_chunks,
+            parent_chunks=len(parent_chunks),
+            child_chunks=len(child_chunks),
+        )
 
-        embeddings = _embed_chunks(chunk_items, progress_callback=progress_callback)
+        embeddings = _embed_chunks(
+            [{"page_number": item.page_start, "text": item.text} for item in child_chunks],
+            progress_callback=progress_callback,
+        )
 
         progress_callback("upserting", f"Menghapus chunk lama untuk doc_id={doc_id}...")
         try:
@@ -527,26 +542,79 @@ def process_document(
         now = datetime.utcnow().isoformat()
         points = []
 
-        for i, (chunk_item, embedding) in enumerate(zip(chunk_items, embeddings)):
-            point_id = str(uuid.uuid4())
-            payload = {
+        points_by_id = {}
+
+        for parent_item in parent_chunks:
+            parent_payload = {
                 "mysql_id": doc_id,
                 "organization_id": organization_id,
+                "opd": organization_id,
                 "filename": document_filename,
-                "text": chunk_item["text"],
-                "page_number": chunk_item["page_number"],
-                "chunk_index": i,
+                "text": parent_item.text,
+                "page_number": parent_item.page_start,
+                "chunk_index": parent_item.block_order,
                 "total_chunks": total_chunks,
-                "section": "",
+                "section": parent_item.section_title,
                 "summary": "",
                 "file_hash": file_hash,
                 "content_hash": content_hash,
+                "chunk_id": parent_item.chunk_id,
+                "chunk_level": parent_item.chunk_level,
+                "chunk_kind": parent_item.chunk_kind,
+                "source_kind": parent_item.source_kind,
+                "section_title": parent_item.section_title,
+                "heading_path": parent_item.heading_path,
+                "page_start": parent_item.page_start,
+                "page_end": parent_item.page_end,
+                "parent_chunk_id": None,
+                "window_prev_id": None,
+                "window_next_id": None,
+                "is_active": is_active,
                 "is_deleted": False,
                 "created_at": now,
                 "updated_at": now,
+                **parent_item.metadata,
+            }
+            parent_point = PointStruct(
+                id=parent_item.chunk_id,
+                vector=[0.0] * config.EMBEDDING_DIMENSION_LARGE,
+                payload=parent_payload,
+            )
+            points_by_id[parent_item.chunk_id] = parent_point
+
+        for i, (chunk_item, embedding) in enumerate(zip(child_chunks, embeddings)):
+            payload = {
+                "mysql_id": doc_id,
+                "organization_id": organization_id,
+                "opd": organization_id,
+                "filename": document_filename,
+                "text": chunk_item.text,
+                "page_number": chunk_item.page_start,
+                "chunk_index": i,
+                "total_chunks": total_chunks,
+                "section": chunk_item.section_title,
+                "summary": "",
+                "file_hash": file_hash,
+                "content_hash": content_hash,
+                "chunk_id": chunk_item.chunk_id,
+                "chunk_level": chunk_item.chunk_level,
+                "chunk_kind": chunk_item.chunk_kind,
+                "source_kind": chunk_item.source_kind,
+                "section_title": chunk_item.section_title,
+                "heading_path": chunk_item.heading_path,
+                "page_start": chunk_item.page_start,
+                "page_end": chunk_item.page_end,
+                "parent_chunk_id": chunk_item.parent_chunk_id,
+                "window_prev_id": chunk_item.window_prev_id,
+                "window_next_id": chunk_item.window_next_id,
+                "is_active": is_active,
+                "is_deleted": False,
+                "created_at": now,
+                "updated_at": now,
+                **chunk_item.metadata,
             }
             vector = embedding.tolist() if hasattr(embedding, "tolist") else embedding
-            points.append(PointStruct(id=point_id, vector=vector, payload=payload))
+            points.append(PointStruct(id=chunk_item.chunk_id, vector=vector, payload=payload))
 
             if len(points) >= _UPSERT_BATCH_SIZE:
                 qdrant.upsert(collection_name=collection_name, points=points)
@@ -557,6 +625,9 @@ def process_document(
                     processed_chunks=i + 1,
                     total_chunks=total_chunks,
                 )
+
+        if points_by_id:
+            qdrant.upsert(collection_name=collection_name, points=list(points_by_id.values()))
 
         if points:
             qdrant.upsert(collection_name=collection_name, points=points)
@@ -616,6 +687,21 @@ def _ensure_collection(qdrant: QdrantClient, collection_name: str):
             field_name="is_deleted",
             field_schema=qdrant_models.PayloadSchemaType.BOOL,
         )
+        qdrant.create_payload_index(
+            collection_name=collection_name,
+            field_name="is_active",
+            field_schema=qdrant_models.PayloadSchemaType.BOOL,
+        )
+        qdrant.create_payload_index(
+            collection_name=collection_name,
+            field_name="chunk_level",
+            field_schema=qdrant_models.PayloadSchemaType.KEYWORD,
+        )
+        qdrant.create_payload_index(
+            collection_name=collection_name,
+            field_name="parent_chunk_id",
+            field_schema=qdrant_models.PayloadSchemaType.KEYWORD,
+        )
 
 
 def main():
@@ -633,6 +719,7 @@ def main():
     filename = params.get("filename")
     file_url = params.get("file_url", "")
     collection_name = params.get("collection_name", config.COLLECTION_DOCUMENT)
+    is_active = params.get("is_active", True)
     lang = params.get("lang", "id")
     skip_dedup = params.get("skip_dedup_check", False)
 
@@ -648,6 +735,7 @@ def main():
         filename=filename,
         file_url=file_url,
         collection_name=collection_name,
+        is_active=is_active,
         lang=lang,
         skip_dedup_check=skip_dedup,
     )

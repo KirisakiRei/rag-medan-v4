@@ -59,6 +59,7 @@ async def soft_delete_document(doc_id: str) -> Dict[str, Any]:
         await qdrant.set_payload(
             collection_name=config.COLLECTION_DOCUMENT,
             payload={
+                "is_active": False,
                 "is_deleted": True,
                 "deleted_at": datetime.utcnow().isoformat()
             },
@@ -158,6 +159,7 @@ async def reactivate_document(doc_id: str) -> Dict[str, Any]:
         await qdrant.set_payload(
             collection_name=config.COLLECTION_DOCUMENT,
             payload={
+                "is_active": True,
                 "is_deleted": False,
                 "deleted_at": None,
                 "reactivated_at": datetime.utcnow().isoformat()

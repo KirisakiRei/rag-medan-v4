@@ -24,6 +24,7 @@ class SyncRequest(BaseModel):
     organization_id: Optional[str] = None  # UUID dari sistem wa manajemen
     filename: Optional[str] = None          # Nama file user-friendly (opsional)
     file_url: str
+    is_active: bool = True
 
 
 class DeleteRequest(BaseModel):
