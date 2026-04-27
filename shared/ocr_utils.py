@@ -7,14 +7,17 @@ import re
 import tempfile
 import logging
 import hashlib
+from copy import deepcopy
 from typing import Any, Callable, Dict, Optional
 
 from config import config
+from shared.pdf_layout_extractor import PdfLayoutResult, extract_pdf_layout
 
 logger = logging.getLogger("ocr_utils")
 
 # Lazy-loaded PaddleOCR engine (singleton)
 _ocr_engine: Optional[object] = None
+_pdf_layout_cache: Dict[tuple, PdfLayoutResult] = {}
 
 
 def _notify_progress(
@@ -139,16 +142,71 @@ def calculate_content_hash(text: str) -> str:
     return hashlib.sha256(normalized.encode('utf-8')).hexdigest()
 
 
-def _extract_pdf_pages(
+def _ocr_pdf_page(
+    page_number: int,
+    page,
+    *,
+    total_page_count: int,
+    dpi: int,
+    retry_dpi: int,
+    progress_callback: Optional[Callable[..., None]] = None,
+) -> str:
+    _notify_progress(
+        progress_callback,
+        stage="ocr",
+        message=f"OCR halaman {page_number}/{total_page_count}...",
+        total_pages=total_page_count,
+        current_page=page_number,
+        used_ocr=True,
+    )
+    page_pixmap = page.get_pixmap(dpi=dpi)
+    image_bytes = page_pixmap.tobytes("png")
+    cleaned_text = _clean_page_text(_ocr_image_bytes(image_bytes))
+
+    if len(cleaned_text) < 20 and retry_dpi > dpi:
+        logger.info(f"[PDF] Retry OCR halaman {page_number} dengan dpi={retry_dpi}")
+        _notify_progress(
+            progress_callback,
+            stage="ocr",
+            message=f"Retry OCR halaman {page_number}/{total_page_count} dengan kualitas lebih tinggi...",
+            total_pages=total_page_count,
+            current_page=page_number,
+            used_ocr=True,
+        )
+        retry_pixmap = page.get_pixmap(dpi=retry_dpi)
+        retry_bytes = retry_pixmap.tobytes("png")
+        retry_text = _clean_page_text(_ocr_image_bytes(retry_bytes))
+        if len(retry_text) > len(cleaned_text):
+            cleaned_text = retry_text
+
+    _notify_progress(
+        progress_callback,
+        stage="ocr",
+        message=f"OCR halaman {page_number}/{total_page_count} selesai.",
+        total_pages=total_page_count,
+        current_page=page_number,
+        used_ocr=True,
+    )
+    return cleaned_text
+
+
+def _extract_pdf_layout_result(
     pdf_path: str,
     dpi: int = 150,
     retry_dpi: int = 200,
     progress_callback: Optional[Callable[..., None]] = None,
-) -> Dict[int, str]:
-    """Ekstrak teks PDF per halaman dengan hybrid (vector text + OCR)."""
+) -> PdfLayoutResult:
+    """Ekstrak teks dan block PDF dengan layout-aware text layer + OCR fallback."""
     import fitz
-    
-    extracted_pages: Dict[int, str] = {}
+
+    try:
+        stat = os.stat(pdf_path)
+        cache_key = (os.path.abspath(pdf_path), stat.st_mtime_ns, stat.st_size, dpi, retry_dpi)
+        cached = _pdf_layout_cache.get(cache_key)
+        if cached is not None:
+            return deepcopy(cached)
+    except OSError:
+        cache_key = None
 
     logger.info(f"[PDF] Opening PDF: {pdf_path}")
     try:
@@ -156,84 +214,33 @@ def _extract_pdf_pages(
     except Exception as e:
         logger.error(f"[PDF] Failed to open PDF: {e}")
         raise
-    
+
     total_page_count = len(pdf_document)
+    pdf_document.close()
     logger.info(f"[PDF] Total pages: {total_page_count}")
     _notify_progress(
         progress_callback,
         stage="extracting",
-        message=f"PDF terdeteksi {total_page_count} halaman. Memulai ekstraksi...",
+        message=f"PDF terdeteksi {total_page_count} halaman. Memulai ekstraksi layout-aware...",
         total_pages=total_page_count,
         current_page=0,
     )
 
-    for page_number in range(1, total_page_count + 1):
-        logger.info(f"[PDF] Processing page {page_number}/{total_page_count}...")
-        current_page = pdf_document[page_number - 1]
+    ocr_used_pages: set[int] = set()
 
-        # Coba pakai teks bawaan PDF
+    def ocr_callback(page_number: int, page) -> str:
         try:
-            extracted_text = current_page.get_text("text") or ""
-        except Exception as e:
-            logger.warning(f"[PDF] Gagal get_text di halaman {page_number}: {e}")
-            extracted_text = ""
-
-        extracted_text = extracted_text.strip()
-        if extracted_text:
-            extracted_pages[page_number] = _clean_page_text(extracted_text)
-            _notify_progress(
-                progress_callback,
-                stage="extracting",
-                message=f"Ekstraksi teks halaman {page_number}/{total_page_count} selesai.",
-                total_pages=total_page_count,
-                current_page=page_number,
-                used_ocr=False,
-            )
-            continue
-
-        # Jika tidak ada teks -> OCR dari bitmap
-        try:
-            _notify_progress(
-                progress_callback,
-                stage="ocr",
-                message=f"OCR halaman {page_number}/{total_page_count}...",
-                total_pages=total_page_count,
-                current_page=page_number,
-                used_ocr=True,
-            )
-            page_pixmap = current_page.get_pixmap(dpi=dpi)
-            image_bytes = page_pixmap.tobytes("png")
-            ocr_extracted_text = _ocr_image_bytes(image_bytes)
-            cleaned_text = _clean_page_text(ocr_extracted_text)
-
-            if len(cleaned_text) < 20 and retry_dpi > dpi:
-                logger.info(f"[PDF] Retry OCR halaman {page_number} dengan dpi={retry_dpi}")
-                _notify_progress(
-                    progress_callback,
-                    stage="ocr",
-                    message=f"Retry OCR halaman {page_number}/{total_page_count} dengan kualitas lebih tinggi...",
-                    total_pages=total_page_count,
-                    current_page=page_number,
-                    used_ocr=True,
-                )
-                retry_pixmap = current_page.get_pixmap(dpi=retry_dpi)
-                retry_bytes = retry_pixmap.tobytes("png")
-                retry_text = _clean_page_text(_ocr_image_bytes(retry_bytes))
-                if len(retry_text) > len(cleaned_text):
-                    cleaned_text = retry_text
-
-            extracted_pages[page_number] = cleaned_text
-            _notify_progress(
-                progress_callback,
-                stage="ocr",
-                message=f"OCR halaman {page_number}/{total_page_count} selesai.",
-                total_pages=total_page_count,
-                current_page=page_number,
-                used_ocr=True,
+            ocr_used_pages.add(page_number)
+            return _ocr_pdf_page(
+                page_number,
+                page,
+                total_page_count=total_page_count,
+                dpi=dpi,
+                retry_dpi=retry_dpi,
+                progress_callback=progress_callback,
             )
         except Exception as e:
             logger.warning(f"[PDF] Gagal render/OCR halaman {page_number}: {e}")
-            extracted_pages[page_number] = ""
             _notify_progress(
                 progress_callback,
                 stage="ocr",
@@ -242,8 +249,42 @@ def _extract_pdf_pages(
                 current_page=page_number,
                 used_ocr=True,
             )
+            return ""
 
-    return dict(sorted(extracted_pages.items(), key=lambda x: x[0]))
+    result = extract_pdf_layout(
+        pdf_path,
+        source_kind="ocr",
+        ocr_page_callback=ocr_callback,
+    )
+    for page_number in range(1, total_page_count + 1):
+        _notify_progress(
+            progress_callback,
+            stage="extracting",
+            message=f"Ekstraksi layout halaman {page_number}/{total_page_count} selesai.",
+            total_pages=total_page_count,
+            current_page=page_number,
+            used_ocr=page_number in ocr_used_pages,
+        )
+    if cache_key is not None:
+        _pdf_layout_cache.clear()
+        _pdf_layout_cache[cache_key] = deepcopy(result)
+    return result
+
+
+def _extract_pdf_pages(
+    pdf_path: str,
+    dpi: int = 150,
+    retry_dpi: int = 200,
+    progress_callback: Optional[Callable[..., None]] = None,
+) -> Dict[int, str]:
+    """Ekstrak teks PDF per halaman dengan layout-aware hybrid extraction."""
+    result = _extract_pdf_layout_result(
+        pdf_path,
+        dpi=dpi,
+        retry_dpi=retry_dpi,
+        progress_callback=progress_callback,
+    )
+    return dict(sorted(result.pages.items(), key=lambda x: x[0]))
 
 
 def extract_text_from_file(
@@ -261,9 +302,6 @@ def extract_text_from_file(
         lang: Bahasa untuk OCR (default: "id")
         return_pages: Jika True return dict, False return string gabungan
     """
-    from docx import Document
-    import openpyxl
-    
     file_extension = os.path.splitext(file_path)[1].lower()
     extracted_pages = {}
 
@@ -291,6 +329,8 @@ def extract_text_from_file(
         _notify_progress(progress_callback, stage="ocr", message="OCR gambar selesai.", current_page=1, total_pages=1)
 
     elif file_extension == ".docx":
+        from docx import Document
+
         try:
             _notify_progress(progress_callback, stage="extracting", message="Membaca dokumen DOCX...", current_page=1, total_pages=1)
             docx_document = Document(file_path)
@@ -315,6 +355,8 @@ def extract_text_from_file(
         _notify_progress(progress_callback, stage="extracting", message="Ekstraksi DOCX selesai.", current_page=1, total_pages=1)
 
     elif file_extension == ".xlsx":
+        import openpyxl
+
         try:
             _notify_progress(progress_callback, stage="extracting", message="Membaca workbook XLSX...", current_page=1, total_pages=1)
             # read_only=True: streaming mode — RAM konstan berapapun ukuran file
@@ -598,13 +640,13 @@ def extract_blocks_from_file(
     file_extension = os.path.splitext(file_path)[1].lower()
 
     if file_extension == ".pdf":
-        extracted_pages = _extract_pdf_pages(
+        layout_result = _extract_pdf_layout_result(
             file_path,
             dpi=config.OCR_PDF_DPI,
             retry_dpi=config.OCR_PDF_DPI_RETRY,
             progress_callback=progress_callback,
         )
-        return build_blocks_from_extracted_pages(extracted_pages, source_kind="ocr")
+        return layout_result.blocks
 
     if file_extension == ".docx":
         return _extract_docx_blocks(file_path)

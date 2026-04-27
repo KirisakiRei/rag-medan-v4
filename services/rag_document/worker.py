@@ -300,6 +300,35 @@ def _build_chunk_items(
     )
 
 
+def _extract_structured_blocks_for_worker(
+    file_ext: str,
+    file_path: str,
+    *,
+    extracted_pages: dict,
+    lang: str,
+    progress_callback: Callable[..., None],
+) -> List[dict]:
+    if file_ext == ".pdf":
+        return extract_blocks_from_file(
+            file_path,
+            lang=lang,
+            progress_callback=progress_callback,
+        )
+
+    if file_ext in [".txt", ".jpg", ".jpeg", ".png"]:
+        source_kind = "ocr" if file_ext in [".jpg", ".jpeg", ".png"] else "narrative"
+        return build_blocks_from_extracted_pages(
+            extracted_pages,
+            source_kind=source_kind,
+        )
+
+    return extract_blocks_from_file(
+        file_path,
+        lang=lang,
+        progress_callback=progress_callback,
+    )
+
+
 def _get_existing_doc_id(point: Optional[object]) -> Optional[str]:
     payload = getattr(point, "payload", None) or {}
     if isinstance(payload, dict):
@@ -483,18 +512,13 @@ def process_document(
                 return {"status": "duplicate", "total_chunks": 0, "message": ""}
 
         progress_callback("chunking", "Mengekstrak block terstruktur dokumen...")
-        if file_ext in [".pdf", ".txt", ".jpg", ".jpeg", ".png"]:
-            source_kind = "ocr" if file_ext in [".pdf", ".jpg", ".jpeg", ".png"] else "narrative"
-            structured_blocks = build_blocks_from_extracted_pages(
-                extracted_pages,
-                source_kind=source_kind,
-            )
-        else:
-            structured_blocks = extract_blocks_from_file(
-                local_file_path,
-                lang=lang,
-                progress_callback=progress_callback,
-            )
+        structured_blocks = _extract_structured_blocks_for_worker(
+            file_ext,
+            local_file_path,
+            extracted_pages=extracted_pages,
+            lang=lang,
+            progress_callback=progress_callback,
+        )
         logger.info(f"[WORKER] Structured blocks: {len(structured_blocks)}")
 
         progress_callback("chunking", f"Menyusun parent-child chunk (ext={file_ext})...")
