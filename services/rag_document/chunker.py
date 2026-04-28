@@ -233,7 +233,10 @@ def semantic_merge_blocks(
 
     for nxt in blocks[1:]:
         same_context = (
-            current.source_kind == nxt.source_kind == "narrative"
+            # Izinkan merge untuk narrative (docx/txt) dan ocr (PDF-OCR, gambar).
+            # "table" dan sumber lain tetap tidak dimerge.
+            current.source_kind == nxt.source_kind
+            and current.source_kind in {"narrative", "ocr"}
             and current.block_type not in {"heading", "table_row", "sheet_header"}
             and nxt.block_type not in {"heading", "table_row", "sheet_header"}
             and current.heading_path == nxt.heading_path

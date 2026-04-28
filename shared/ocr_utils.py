@@ -329,11 +329,11 @@ def extract_text_from_file(
         _notify_progress(progress_callback, stage="ocr", message="OCR gambar selesai.", current_page=1, total_pages=1)
 
     elif file_extension == ".docx":
-        from docx import Document
-
         try:
             _notify_progress(progress_callback, stage="extracting", message="Membaca dokumen DOCX...", current_page=1, total_pages=1)
-            docx_document = Document(file_path)
+            # Gunakan _extract_docx_blocks (yang sudah mendukung tabel) untuk
+            # memastikan content_hash mencerminkan seluruh isi dokumen.
+            docx_blocks = _extract_docx_blocks(file_path)
         except Exception as e:
             logger.warning(f"[DOCX] Gagal membuka file DOCX {file_path}: {e}")
             extracted_pages[1] = ""
@@ -342,14 +342,15 @@ def extract_text_from_file(
             return ""
 
         text_parts = []
-        for para in docx_document.paragraphs:
-            if not para.text.strip():
+        for block in docx_blocks:
+            block_text = block.get("text", "").strip()
+            if not block_text:
                 continue
-            # Heading-aware: tambah double newline sebelum heading (batas chunk alami)
-            if para.style.name.startswith("Heading"):
-                text_parts.append("\n\n" + para.text.strip())
+            # Tambah separator antar heading agar batas chunk terlihat jelas
+            if block.get("block_type") == "heading":
+                text_parts.append("\n\n" + block_text)
             else:
-                text_parts.append(para.text.strip())
+                text_parts.append(block_text)
         extracted_text = "\n".join(text_parts)
         extracted_pages[1] = _clean_page_text(extracted_text)
         _notify_progress(progress_callback, stage="extracting", message="Ekstraksi DOCX selesai.", current_page=1, total_pages=1)
@@ -509,6 +510,8 @@ def build_blocks_from_extracted_pages(
 
 def _extract_docx_blocks(file_path: str) -> list[dict]:
     from docx import Document
+    from docx.text.paragraph import Paragraph as DocxParagraph
+    from docx.table import Table as DocxTable
 
     blocks: list[dict] = []
     try:
@@ -519,39 +522,117 @@ def _extract_docx_blocks(file_path: str) -> list[dict]:
 
     heading_path: list[str] = []
     block_order = 0
-    for para in docx_document.paragraphs:
-        text = para.text.strip()
-        if not text:
-            continue
 
-        style_name = (getattr(para.style, "name", "") or "").strip()
-        heading_level = None
-        block_type = "paragraph"
-        heading_text = heading_path[-1] if heading_path else ""
+    # Iterasi body XML agar urutan paragraf dan tabel sesuai dokumen asli.
+    # docx_document.paragraphs hanya mengembalikan paragraf, mengabaikan tabel.
+    for child in docx_document.element.body:
+        tag = child.tag.split("}")[-1] if "}" in child.tag else child.tag
 
-        if style_name.startswith("Heading"):
-            match = re.search(r"(\d+)", style_name)
-            heading_level = int(match.group(1)) if match else 1
-            heading_path = heading_path[:heading_level - 1] + [text]
-            block_type = "heading"
-            heading_text = text
-        elif _LIST_HINT_RE.match(text):
-            block_type = "list_item"
+        if tag == "p":
+            # ── Paragraf ──────────────────────────────────────────────────────
+            para = DocxParagraph(child, docx_document)
+            text = para.text.strip()
+            if not text:
+                continue
 
-        blocks.append({
-            "page_number": 1,
-            "text": _clean_page_text(text),
-            "block_type": block_type,
-            "heading_level": heading_level,
-            "heading_text": heading_text,
-            "heading_path": list(heading_path),
-            "source_kind": "narrative",
-            "block_order": block_order,
-            "metadata": {"docx_style": style_name},
-        })
-        block_order += 1
+            style_name = (getattr(para.style, "name", "") or "").strip()
+            heading_level = None
+            block_type = "paragraph"
+            heading_text = heading_path[-1] if heading_path else ""
+
+            if style_name.startswith("Heading"):
+                match = re.search(r"(\d+)", style_name)
+                heading_level = int(match.group(1)) if match else 1
+                heading_path = heading_path[:heading_level - 1] + [text]
+                block_type = "heading"
+                heading_text = text
+            elif _LIST_HINT_RE.match(text):
+                block_type = "list_item"
+
+            blocks.append({
+                "page_number": 1,
+                "text": _clean_page_text(text),
+                "block_type": block_type,
+                "heading_level": heading_level,
+                "heading_text": heading_text,
+                "heading_path": list(heading_path),
+                "source_kind": "narrative",
+                "block_order": block_order,
+                "metadata": {"docx_style": style_name},
+            })
+            block_order += 1
+
+        elif tag == "tbl":
+            # ── Tabel ─────────────────────────────────────────────────────────
+            try:
+                table = DocxTable(child, docx_document)
+                rows = table.rows
+                if not rows:
+                    continue
+
+                # Baris pertama dijadikan header
+                header_cells = [cell.text.strip() for cell in rows[0].cells]
+                # Hapus sel duplikat dari merged cells (python-docx mengembalikan
+                # sel yang sama beberapa kali untuk merged cells)
+                seen: set[int] = set()
+                unique_header: list[str] = []
+                for cell in rows[0].cells:
+                    cid = id(cell._tc)
+                    if cid not in seen:
+                        seen.add(cid)
+                        unique_header.append(cell.text.strip())
+                header_text = " | ".join(unique_header)
+
+                current_heading = heading_path[-1] if heading_path else ""
+
+                if len(rows) == 1:
+                    # Hanya header, tidak ada baris data
+                    if any(h.strip() for h in unique_header):
+                        blocks.append({
+                            "page_number": 1,
+                            "text": header_text,
+                            "block_type": "table_row",
+                            "heading_level": None,
+                            "heading_text": current_heading,
+                            "heading_path": list(heading_path),
+                            "source_kind": "table",
+                            "block_order": block_order,
+                            "metadata": {"is_header": True},
+                        })
+                        block_order += 1
+                else:
+                    for row_idx, row in enumerate(rows[1:], start=1):
+                        seen_row: set[int] = set()
+                        cells: list[str] = []
+                        for cell in row.cells:
+                            cid = id(cell._tc)
+                            if cid not in seen_row:
+                                seen_row.add(cid)
+                                cells.append(cell.text.strip())
+                        if not any(c for c in cells):
+                            continue
+                        row_text = " | ".join(cells)
+                        combined = f"{header_text}\n{row_text}" if header_text else row_text
+                        blocks.append({
+                            "page_number": 1,
+                            "text": combined,
+                            "block_type": "table_row",
+                            "heading_level": None,
+                            "heading_text": current_heading,
+                            "heading_path": list(heading_path),
+                            "source_kind": "table",
+                            "block_order": block_order,
+                            "row_start": row_idx,
+                            "row_end": row_idx,
+                            "metadata": {"header_row": unique_header},
+                        })
+                        block_order += 1
+            except Exception as e:
+                logger.warning(f"[DOCX] Gagal ekstrak tabel di {file_path}: {e}")
 
     return blocks
+
+
 
 
 def _extract_xlsx_blocks(file_path: str) -> list[dict]:

@@ -295,7 +295,9 @@ def _build_chunk_items(
         child_chunk_size=config.DOC_CHILD_CHUNK_SIZE,
         parent_chunk_size=config.DOC_PARENT_CHUNK_SIZE,
         overlap=config.DOC_CHUNK_OVERLAP,
-        enable_semantic_merge=config.ENABLE_SEMANTIC_MERGE and file_ext not in [".pdf", ".jpg", ".jpeg", ".png", ".xlsx", ".xls"],
+        # PDF diizinkan semantic merge agar block OCR yang terfragmentasi
+        # dapat digabung. Merge tetap dibatasi oleh heading_path di chunker.
+        enable_semantic_merge=config.ENABLE_SEMANTIC_MERGE and file_ext not in [".jpg", ".jpeg", ".png", ".xlsx", ".xls"],
         similarity_threshold=config.SEMANTIC_MERGE_SIM_THRESHOLD,
     )
 

@@ -40,6 +40,95 @@ _OFFICIAL_HEADING_RE = re.compile(
     re.IGNORECASE,
 )
 
+_logger = __import__("logging").getLogger("pdf_layout_extractor")
+
+
+def _extract_table_blocks_from_page(
+    page,
+    page_number: int,
+) -> tuple[list[dict], list[tuple]]:
+    """Ekstrak blok tabel terstruktur dari halaman PDF menggunakan find_tables().
+
+    Mengembalikan (table_blocks, table_bboxes).
+    - table_blocks: list blok dict siap masuk ke pipeline (source_kind="table")
+    - table_bboxes: list (x0, y0, x1, y1) area tabel untuk filter raw block
+    Fallback ke ([], []) jika find_tables tidak tersedia atau tabel tidak ditemukan.
+    """
+    table_blocks: list[dict] = []
+    table_bboxes: list[tuple] = []
+    try:
+        finder = page.find_tables()
+        if not finder or not getattr(finder, "tables", None):
+            return table_blocks, table_bboxes
+
+        for table in finder.tables:
+            bbox = tuple(float(v) for v in table.bbox)
+            rows = table.extract()
+            if not rows:
+                continue
+
+            # Baris pertama sebagai header
+            header = [str(c).strip() if c is not None else "" for c in rows[0]]
+            header_text = " | ".join(header)
+            data_rows = rows[1:] if len(rows) > 1 else []
+
+            if not data_rows:
+                # Tabel hanya header (mis. judul kolom tanpa data)
+                if any(h.strip() for h in header):
+                    table_blocks.append({
+                        "page_number": page_number,
+                        "text": header_text,
+                        "block_type": "table_row",
+                        "heading_level": None,
+                        "heading_text": "",
+                        "heading_path": [],
+                        "source_kind": "table",
+                        "block_order": 0,  # Akan di-reorder di extract_pdf_layout
+                        "metadata": {"is_header": True},
+                    })
+                    table_bboxes.append(bbox)
+            else:
+                table_bboxes.append(bbox)
+                for row_idx, row in enumerate(data_rows, start=1):
+                    cells = [str(c).strip() if c is not None else "" for c in row]
+                    if not any(c for c in cells):
+                        continue
+                    row_text = " | ".join(cells)
+                    combined = f"{header_text}\n{row_text}" if header_text else row_text
+                    table_blocks.append({
+                        "page_number": page_number,
+                        "text": combined,
+                        "block_type": "table_row",
+                        "heading_level": None,
+                        "heading_text": "",
+                        "heading_path": [],
+                        "source_kind": "table",
+                        "block_order": 0,
+                        "row_start": row_idx,
+                        "row_end": row_idx,
+                        "metadata": {"header_row": header},
+                    })
+    except Exception as exc:
+        _logger.debug(f"[PDF-TABLE] Halaman {page_number}: find_tables gagal atau tidak tersedia — {exc}")
+
+    return table_blocks, table_bboxes
+
+
+def _raw_block_in_table(block: "_RawBlock", table_bboxes: list[tuple]) -> bool:
+    """Kembalikan True jika raw block berada ≥30% overlap dengan area tabel.
+
+    Digunakan untuk mencegah duplikasi teks tabel di antara raw blocks dan table_blocks.
+    """
+    bw = max(1.0, block.x1 - block.x0)
+    bh = max(1.0, block.y1 - block.y0)
+    block_area = bw * bh
+    for tx0, ty0, tx1, ty1 in table_bboxes:
+        ox = max(0.0, min(block.x1, tx1) - max(block.x0, tx0))
+        oy = max(0.0, min(block.y1, ty1) - max(block.y0, ty0))
+        if ox > 0 and oy > 0 and (ox * oy) / block_area >= 0.30:
+            return True
+    return False
+
 
 def _normalize_line(text: str) -> str:
     return _WHITESPACE_RE.sub(" ", (text or "").strip())
@@ -376,27 +465,44 @@ def extract_pdf_layout(
     document = fitz.open(pdf_path)
     try:
         raw_blocks_by_page: Dict[int, List[_RawBlock]] = {}
+        # Kumpulkan tabel terstruktur dan bbox-nya di pass pertama
+        table_blocks_by_page: Dict[int, list[dict]] = {}
+        table_bboxes_by_page: Dict[int, list[tuple]] = {}
+
         for page_index in range(len(document)):
             page_number = page_index + 1
-            raw_blocks_by_page[page_number] = _extract_raw_blocks(document[page_index], page_number)
+            page = document[page_index]
+            raw_blocks_by_page[page_number] = _extract_raw_blocks(page, page_number)
+            tbl_blocks, tbl_bboxes = _extract_table_blocks_from_page(page, page_number)
+            table_blocks_by_page[page_number] = tbl_blocks
+            table_bboxes_by_page[page_number] = tbl_bboxes
 
         repeated_noise = _find_repeated_marginal_noise(raw_blocks_by_page)
         ordered_blocks_by_page: Dict[int, List[_RawBlock]] = {}
         pages: Dict[int, str] = {}
         all_blocks: List[dict] = []
+        # Halaman dengan text layer yang punya tabel terstruktur
+        pages_with_tables: set[int] = set()
         block_order = 0
 
         for page_index in range(len(document)):
             page_number = page_index + 1
+            tbl_bboxes = table_bboxes_by_page.get(page_number, [])
+
+            # Keluarkan raw blocks yang berada di dalam area tabel
+            # untuk mencegah duplikasi antara text layer dan table_blocks
             raw_blocks = [
                 block for block in raw_blocks_by_page.get(page_number, [])
                 if _normalized_noise_key(block.text) not in repeated_noise
+                and not _raw_block_in_table(block, tbl_bboxes)
             ]
             ordered_raw_blocks = _order_blocks(raw_blocks)
             provisional_text = _page_text_from_blocks(ordered_raw_blocks)
             provisional_blocks = [{"text": block.text} for block in ordered_raw_blocks]
 
             if should_ocr_page(provisional_text, provisional_blocks) and ocr_page_callback:
+                # Halaman scan: gunakan OCR, skip table injection
+                # (struktur tabel hilang saat discan — tidak bisa diandalkan)
                 ocr_text = ocr_page_callback(page_number, document[page_index])
                 ocr_blocks = _blocks_from_plain_text(
                     ocr_text,
@@ -412,10 +518,30 @@ def extract_pdf_layout(
                     continue
 
             ordered_blocks_by_page[page_number] = ordered_raw_blocks
+            if table_blocks_by_page.get(page_number):
+                pages_with_tables.add(page_number)
 
         text_layer_blocks = _build_legacy_blocks(ordered_blocks_by_page, source_kind=source_kind)
+
+        # Inject table_blocks dari halaman text-layer ke hasil akhir
+        if pages_with_tables:
+            extra_table_blocks: List[dict] = []
+            for page_number in pages_with_tables:
+                extra_table_blocks.extend(table_blocks_by_page[page_number])
+            if extra_table_blocks:
+                text_layer_blocks = sorted(
+                    all_blocks + text_layer_blocks + extra_table_blocks,
+                    key=lambda block: (block["page_number"], block["block_order"]),
+                )
+                for index, block in enumerate(text_layer_blocks):
+                    block["block_order"] = index
+                all_blocks = []  # Sudah digabung di atas
+
         if all_blocks:
-            text_layer_blocks = sorted(all_blocks + text_layer_blocks, key=lambda block: (block["page_number"], block["block_order"]))
+            text_layer_blocks = sorted(
+                all_blocks + text_layer_blocks,
+                key=lambda block: (block["page_number"], block["block_order"]),
+            )
             for index, block in enumerate(text_layer_blocks):
                 block["block_order"] = index
 
@@ -427,3 +553,4 @@ def extract_pdf_layout(
         return PdfLayoutResult(pages=dict(sorted(pages.items())), blocks=text_layer_blocks)
     finally:
         document.close()
+
