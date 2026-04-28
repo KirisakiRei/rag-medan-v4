@@ -87,8 +87,8 @@ class Config:
     OCR_STALL_TIMEOUT = _env("OCR_STALL_TIMEOUT", 300, int)
     OCR_HARD_TIMEOUT = _env("OCR_HARD_TIMEOUT", 21600, int)
     OCR_QUEUE_LOG_INTERVAL = _env("OCR_QUEUE_LOG_INTERVAL", 30, int)
-    OCR_PDF_DPI = _env("OCR_PDF_DPI", 150, int)
-    OCR_PDF_DPI_RETRY = _env("OCR_PDF_DPI_RETRY", 200, int)
+    OCR_PDF_DPI = _env("OCR_PDF_DPI", 200, int)         # 200 untuk ebook/majalah; 150 cukup utk surat biasa
+    OCR_PDF_DPI_RETRY = _env("OCR_PDF_DPI_RETRY", 250, int)  # retry jika hasil OCR < 20 char
     OCR_DOWNLOAD_PROGRESS_MB = _env("OCR_DOWNLOAD_PROGRESS_MB", 5, int)
 
     # RAG Configuration

@@ -13,6 +13,9 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, Optional
 from urllib.parse import urlparse
 
+import urllib3
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from config import config

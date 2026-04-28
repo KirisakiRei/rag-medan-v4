@@ -105,13 +105,22 @@ async def _expand_document_context(payload: Dict[str, Any]) -> str:
     ]
     related_payloads = await _retrieve_payloads_by_ids(point_ids)
     parent_payload = related_payloads.get(str(payload.get("parent_chunk_id")))
-
-    if parent_payload and len(text) < 450:
-        return format_for_display(parent_payload.get("text", text))
-
-    parts = []
     prev_payload = related_payloads.get(str(payload.get("window_prev_id")))
     next_payload = related_payloads.get(str(payload.get("window_next_id")))
+
+    parent_text = (parent_payload.get("text", "") if parent_payload else "") or ""
+
+    # Gunakan parent jika parent JAUH lebih informatif dari child.
+    # Threshold: parent harus minimal 2x lebih panjang dan >450 char.
+    # Jika tidak, parent mungkin juga pendek (misal: PDF ebook/scan yg OCR-nya
+    # hanya menangkap judul+alamat) — dalam kasus ini window sibling lebih berguna.
+    if parent_payload and len(parent_text) >= max(450, len(text) * 2):
+        return format_for_display(parent_text)
+
+    # Window expansion: prev_sibling + self + next_sibling
+    # Ini sangat penting untuk ebook/majalah dimana paragraf deskripsi
+    # sering menjadi sibling chunk (window_next) dari chunk judul/alamat.
+    parts = []
     if prev_payload:
         parts.append(prev_payload.get("text", ""))
     parts.append(text)
@@ -119,16 +128,23 @@ async def _expand_document_context(payload: Dict[str, Any]) -> str:
         parts.append(next_payload.get("text", ""))
 
     expanded = "\n\n".join(part for part in parts if part and part.strip())
+
+    # Jika window expansion tidak menambah informasi berarti,
+    # fallback ke parent (meskipun pendek) agar minimal ada konteks section.
+    if len(expanded) <= len(text) + 20 and parent_text:
+        return format_for_display(parent_text)
+
     return format_for_display(expanded or text)
 
 
 async def search_document_bank(
     query: str,
     limit: int = 5,
-    request_source: str = "unknown"
+    request_source: str = "unknown",
 ) -> Dict[str, Any]:
     """Search document_bank (direct mode)."""
     logger.info(f"[API] doc-search query='{query}' limit={limit} | source={request_source}")
+
 
     try:
         query_vector, = await encode_texts([query], model=model, prefix="query: ", model_size="large")
@@ -245,7 +261,9 @@ async def search_document_unified(
                     qdrant_models.FieldCondition(key="chunk_level", match=qdrant_models.MatchValue(value="child")),
                 ]
             ),
-            limit=top_k * 2  # Fetch lebih banyak untuk filtering
+            # Fetch 5x lebih banyak agar chunk deskripsi dari halaman lain
+            # (yang skor embedding-nya sedikit lebih rendah) ikut dibandingkan.
+            limit=top_k * 5,
         )
         qdrant_duration = time.time() - qdrant_start
 
@@ -276,21 +294,50 @@ async def search_document_unified(
             }
 
         scored_results = []
-        
+
         for hit in result_points:
             payload, score = _extract_payload_and_score(hit)
             if not payload:
                 continue
             document_text = await _expand_document_context(payload)
-            
+
             if score >= 0.4 and document_text:
-                if score >= 0.85:
+                # ── Content quality re-ranking ────────────────────────────────
+                # Chunk "direktori" (nama+kategori+alamat) sangat pendek tapi
+                # skor embedding-nya tinggi karena mengandung nama eksak.
+                # Beri penalti agar chunk dengan paragraf deskripsi lebih kaya
+                # bisa naik ke atas meskipun skor embedding-nya sedikit lebih rendah.
+                raw_text = payload.get("text", "") or ""
+                chunk_kind = payload.get("chunk_kind", "")
+                text_len = len(raw_text.strip())
+
+                quality_penalty = 0.0
+                if text_len < 80:
+                    # Sangat pendek: hanya judul 1 baris → penalti besar
+                    quality_penalty = 0.12
+                elif text_len < 150:
+                    # Pendek: kemungkinan heading+alamat saja → penalti sedang
+                    quality_penalty = 0.07
+                elif text_len < 300 and chunk_kind == "heading":
+                    # Heading pendek → penalti kecil
+                    quality_penalty = 0.03
+
+                adjusted_score = max(0.0, score - quality_penalty)
+
+                if adjusted_score >= 0.85:
                     note = "high_score"
-                elif score >= 0.70:
+                elif adjusted_score >= 0.70:
                     note = "good_score"
                 else:
                     note = "marginal"
-                
+
+                if quality_penalty > 0:
+                    logger.debug(
+                        f"[DOC-SEARCH] Quality penalty -{quality_penalty:.2f} "
+                        f"(len={text_len}, kind={chunk_kind}): "
+                        f"{score:.3f} → {adjusted_score:.3f}"
+                    )
+
                 scored_results.append({
                     "source": "document",
                     "question": "-",
@@ -300,7 +347,7 @@ async def search_document_unified(
                     "category_id": None,
                     "dense_score": round(score, 3),
                     "overlap_score": 0.0,
-                    "final_score": round(score, 3),
+                    "final_score": round(adjusted_score, 3),
                     "note": note,
                     "content_for_check": document_text[:2000],
                     "document_info": {
@@ -312,9 +359,9 @@ async def search_document_unified(
                         "heading_path": payload.get("heading_path", "-"),
                     }
                 })
-        
+
         scored_results = sorted(scored_results, key=lambda x: x["final_score"], reverse=True)
-        
+
         top_results = scored_results[:top_k]
         
         logger.info(f"[DOC-SEARCH] Found {len(scored_results)} results, returning top {len(top_results)}")

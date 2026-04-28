@@ -150,11 +150,13 @@ async def check_relevance_with_ai(
         score = candidate.get("final_score", 0)
         content_for_check = candidate.get("content_for_check", "")
         
-        # High score bypass: skip AI check if dense >= 0.90
-        if candidate.get("dense_score", 0) >= 0.90:
+        # High score bypass: skip AI check jika final_score >= 0.90
+        # Gunakan final_score (bukan dense_score) karena final_score sudah
+        # memperhitungkan quality penalty dari search.py.
+        if candidate.get("final_score", 0) >= 0.90:
             logger.info(f"  [{idx+1}] {source.upper()}: score={score:.4f} → HIGH SCORE, SKIP AI CHECK ✓")
             selected_candidate = candidate
-            ai_reason = f"High confidence score (dense >= 0.90)"
+            ai_reason = f"High confidence score (final >= 0.90)"
             break
         
         # AI Relevance Check
@@ -432,7 +434,7 @@ async def unified_search(
     
     # 5. AI RELEVANCE CHECK
     selected_candidate, ai_reason, candidates_checked, relevance_duration = \
-        await check_relevance_with_ai(all_candidates, user_question, max_check=3)
+        await check_relevance_with_ai(all_candidates, user_question, max_check=5)
     
     total_duration = time.time() - start_time
     
