@@ -69,7 +69,7 @@ async def _call_gemini_llm(
     system_prompt: str,
     user_message: str,
     temperature: float = 0.0,
-    max_tokens: int = 256
+    max_tokens: Optional[int] = None
 ) -> Optional[str]:
     """Call Gemini API with concurrency control via semaphore."""
     semaphore = _get_semaphore()
@@ -89,10 +89,11 @@ async def _call_gemini_llm(
                 ],
                 "generationConfig": {
                     "temperature": temperature,
-                    "topP": 1,
-                    "maxOutputTokens": max_tokens
+                    "topP": 1
                 }
             }
+            if max_tokens is not None:
+                payload["generationConfig"]["maxOutputTokens"] = max_tokens
             
             headers = {"Content-Type": "application/json"}
             response = await client.post(url, headers=headers, json=payload)
@@ -125,7 +126,7 @@ async def call_filter_llm(
     system_prompt: str,
     user_message: str,
     temperature: float = 0.0,
-    max_tokens: int = 256
+    max_tokens: Optional[int] = None
 ) -> Optional[str]:
     """Call LLM based on configured mode (Gemini or Router)."""
     mode = config.LLM_PROVIDER.lower()
@@ -149,9 +150,10 @@ async def call_filter_llm(
                     {"role": "user", "content": user_message.strip()}
                 ],
                 "temperature": temperature,
-                "max_tokens": max_tokens,
                 "stream": False
             }
+            if max_tokens is not None:
+                payload["max_tokens"] = max_tokens
             
             headers = {
                 "Content-Type": "application/json",
@@ -253,8 +255,7 @@ async def ai_pre_filter(question: str) -> Dict[str, Any]:
         llm_response = await call_filter_llm(
             system_prompt=prompt,
             user_message=question,
-            temperature=0.0,
-            max_tokens=256
+            temperature=0.0
         )
 
         if not llm_response:
@@ -297,8 +298,7 @@ async def ai_check_relevance(user_question: str, rag_result: str) -> Dict[str, A
         llm_response = await call_filter_llm(
             system_prompt=prompt,
             user_message=user_prompt,
-            temperature=0.1,
-            max_tokens=256
+            temperature=0.1
         )
 
         if not llm_response:
@@ -345,8 +345,7 @@ async def ai_pre_filter_usulan(user_input: str) -> Dict[str, str]:
         llm_response = await call_filter_llm(
             system_prompt=prompt,
             user_message=user_input,
-            temperature=0.2,
-            max_tokens=256
+            temperature=0.2
         )
 
         if not llm_response:
@@ -376,8 +375,7 @@ async def ai_relevance_usulan(user_input: str, top_result: str) -> Dict[str, Any
         llm_response = await call_filter_llm(
             system_prompt=prompt,
             user_message=user_prompt,
-            temperature=0.0,
-            max_tokens=256
+            temperature=0.0
         )
 
         if not llm_response:
@@ -445,8 +443,7 @@ async def ai_rerank_results(
         llm_response = await call_filter_llm(
             system_prompt=PROMPT_RERANK,
             user_message=user_prompt,
-            temperature=0.1,
-            max_tokens=256
+            temperature=0.1
         )
 
         if not llm_response:
