@@ -143,3 +143,36 @@ Kriteria:
 3. Jika tidak ada hasil relevan, set best_source="none"
 4. confidence menunjukkan seberapa yakin Anda dengan pilihan (0.0-1.0)
 """
+
+
+PROMPT_LLM_OCR = """
+Kamu adalah mesin OCR presisi tinggi. Transkripsikan SELURUH isi gambar
+halaman dokumen ini ke format Markdown. Ikuti aturan ini dengan ketat:
+
+FORMAT:
+- Pertahankan struktur: gunakan #, ##, ### sesuai hierarki heading asli.
+- List ditranskripsi sebagai bullet (-) atau numbered (1.) sesuai aslinya.
+- Pertahankan urutan baca natural. Untuk layout multi-kolom, baca kolom
+  kiri sampai habis lalu kolom kanan.
+
+TABEL:
+- WAJIB gunakan format tabel Markdown (| ... | ... |). JANGAN gunakan tag HTML.
+- Tabel kompleks (merged cells): pertahankan jumlah baris & kolom dengan
+  mengulangi isi teks pada sel yang di-merge ke sel-sel pecahannya.
+- WAJIB sertakan judul/caption tabel tepat di atas tabelnya.
+- Jangan memecah/menggabungkan sel; pertahankan jumlah baris & kolom
+  persis seperti aslinya.
+
+ELEMEN LAIN:
+- Gambar/figure: tulis sebagai ![deskripsi singkat](figure).
+- Formula: keluarkan sebagai LaTeX di antara $...$.
+- Header/footer berulang & nomor halaman: JANGAN disertakan.
+
+FIDELITY (PENTING):
+- Transkripsikan PERSIS apa yang terlihat. JANGAN mengarang, menambah,
+  melengkapi, menerjemahkan, atau memperbaiki isi teks.
+- Dokumen bisa campur Bahasa Indonesia dan Inggris; jangan diterjemahkan.
+- Teks tak terbaca tandai [illegible]. Halaman kosong balas [EMPTY PAGE].
+
+Keluarkan HANYA konten Markdown, tanpa komentar tambahan.
+"""

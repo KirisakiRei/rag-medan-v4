@@ -91,6 +91,19 @@ class Config:
     OCR_PDF_DPI_RETRY = _env("OCR_PDF_DPI_RETRY", 250, int)  # retry jika hasil OCR < 20 char
     OCR_DOWNLOAD_PROGRESS_MB = _env("OCR_DOWNLOAD_PROGRESS_MB", 5, int)
 
+    # OCR Mode: "local" (PaddleOCR) atau "api" (LLM via Router API)
+    OCR_MODE = _env("OCR_MODE", "local")
+
+    # Router API Configuration (untuk OCR_MODE=api)
+    ROUTER_API_URL = _env("ROUTER_API_URL", "http://localhost:20128/v1/chat/completions")
+    ROUTER_API_KEY = _env("ROUTER_API_KEY", "")
+
+    # LLM OCR Model Settings
+    OCR_LLM_MODEL = _env("OCR_LLM_MODEL", "ag/gemini-3-flash")
+    OCR_LLM_MAX_TOKENS = _env("OCR_LLM_MAX_TOKENS", 8192, int)
+    OCR_DELAY = _env("OCR_DELAY", 2, int)     # Jeda (detik) antar request ke Router API per halaman
+    OCR_RETRIES = _env("OCR_RETRIES", 3, int) # Jumlah maksimum percobaan ulang jika request gagal
+
     # RAG Configuration
     USE_POST_SUMMARY = _env("USE_POST_SUMMARY", "false", bool)
     POST_SUMMARY_TOP_K = _env("POST_SUMMARY_TOP_K", 2, int)
@@ -109,11 +122,16 @@ class Config:
     RERANK_WEIGHT_WEB = _env("RERANK_WEIGHT_WEB", 0.25, float)
     
     # Chunking Configuration (Document & Web)
-    DOC_CHILD_CHUNK_SIZE = _env("DOC_CHILD_CHUNK_SIZE", 420, int)
-    DOC_PARENT_CHUNK_SIZE = _env("DOC_PARENT_CHUNK_SIZE", 1200, int)
-    DOC_CHUNK_OVERLAP = _env("DOC_CHUNK_OVERLAP", 90, int)
-    WEB_CHILD_CHUNK_SIZE = _env("WEB_CHILD_CHUNK_SIZE", 420, int)
-    WEB_PARENT_CHUNK_SIZE = _env("WEB_PARENT_CHUNK_SIZE", 1000, int)
+    # Nilai dikalibrasi untuk model E5 Large (multilingual, batas 512 token).
+    # Estimator internal menggunakan rasio 3 char/token (vs 4 untuk Inggris)
+    # karena subword tokenization Bahasa Indonesia lebih banyak.
+    # Child chunk: ~380 est. token → ~330-360 token nyata (aman + margin heading prefix)
+    # Parent chunk: tidak di-embed, digunakan untuk retrieval context expansion
+    DOC_CHILD_CHUNK_SIZE = _env("DOC_CHILD_CHUNK_SIZE", 380, int)
+    DOC_PARENT_CHUNK_SIZE = _env("DOC_PARENT_CHUNK_SIZE", 1100, int)
+    DOC_CHUNK_OVERLAP = _env("DOC_CHUNK_OVERLAP", 70, int)
+    WEB_CHILD_CHUNK_SIZE = _env("WEB_CHILD_CHUNK_SIZE", 380, int)
+    WEB_PARENT_CHUNK_SIZE = _env("WEB_PARENT_CHUNK_SIZE", 950, int)
     ENABLE_SEMANTIC_MERGE = _env("ENABLE_SEMANTIC_MERGE", "true", bool)
     SEMANTIC_MERGE_SIM_THRESHOLD = _env("SEMANTIC_MERGE_SIM_THRESHOLD", 0.32, float)
     RETRIEVAL_CONTEXT_EXPANSION = _env("RETRIEVAL_CONTEXT_EXPANSION", "true", bool)

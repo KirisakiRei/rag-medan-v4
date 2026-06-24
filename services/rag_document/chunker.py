@@ -61,9 +61,19 @@ def _normalize_text(text: str) -> str:
 
 
 def _estimate_tokens(text: str) -> int:
+    """Estimasi jumlah token untuk model E5 Large (multilingual).
+
+    Menggunakan rasio 3 karakter per token (bukan 4) karena:
+    - Model multilingual (WordPiece/SentencePiece) memecah teks Indonesia
+      menjadi subword rata-rata lebih banyak dibanding teks Inggris.
+    - Kata Indonesia rata-rata 7 karakter, dipecah ~1.3-1.5 subword,
+      menghasilkan rasio ~3.0-3.5 chars/token (vs ~4.5 untuk Inggris).
+    - Formula ini menghasilkan estimasi konservatif yang memastikan chunk
+      tidak melampaui batas 512 token E5 Large setelah heading prefix.
+    """
     if not text:
         return 0
-    return max(len(text.split()), len(text) // 4)
+    return max(len(text.split()), len(text) // 3)
 
 
 def _token_set(text: str) -> set[str]:
@@ -254,8 +264,8 @@ def semantic_merge_blocks(
         should_merge = (
             combined_tokens <= max_tokens and (
                 similarity >= similarity_threshold
-                or _estimate_tokens(current.text) < 140
-                or _estimate_tokens(nxt.text) < 140
+                or _estimate_tokens(current.text) < 100  # Block terlalu kecil → merge
+                or _estimate_tokens(nxt.text) < 100
             )
         )
 

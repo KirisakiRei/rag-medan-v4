@@ -1,14 +1,18 @@
 """
 RAG Medan v3 - Shared OCR Utils
-Utilities untuk OCR dan text extraction dari berbagai format file
+Utilities untuk OCR dan text extraction dari berbagai format file.
+Mendukung dua mode:
+  - local: PaddleOCR (default)
+  - api  : LLM via Router API (9router)
 """
 import os
 import re
+import time
 import tempfile
 import logging
 import hashlib
 from copy import deepcopy
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from config import config
 from shared.pdf_layout_extractor import PdfLayoutResult, extract_pdf_layout
@@ -39,7 +43,7 @@ def _notify_progress(
 
 
 def get_ocr_engine():
-    """Lazy load PaddleOCR engine."""
+    """Lazy load PaddleOCR engine (singleton)."""
     global _ocr_engine
     if _ocr_engine is None:
         logger.info("[OCR] Initializing PaddleOCR engine...")
@@ -50,7 +54,21 @@ def get_ocr_engine():
 
 
 def _ocr_image_bytes(img_bytes: bytes) -> str:
-    """OCR dari bytes gambar."""
+    """OCR dari bytes gambar.
+
+    Routing otomatis berdasarkan config.OCR_MODE:
+    - 'api'  : kirim ke LLM Router API (menghasilkan Markdown)
+    - 'local': gunakan PaddleOCR (menghasilkan plain text)
+    """
+    if config.OCR_MODE == "api":
+        from shared.llm_ocr import call_llm_ocr
+        logger.info("[OCR] Mode API: mengirim gambar ke LLM Router.")
+        result = call_llm_ocr(img_bytes)
+        if not result:
+            logger.warning("[OCR] Mode API: hasil kosong dari LLM Router (gambar mungkin tidak terbaca).")
+        return result
+
+    # --- Mode local: PaddleOCR ---
     temp_file_path = None
     try:
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as temp_file:
@@ -88,10 +106,10 @@ def clean_ocr_text(text: str) -> str:
     """Membersihkan hasil OCR dari formatting berlebihan."""
     if not text:
         return ""
-    
+
     text = re.sub(r'\n{3,}', '\n\n', text)
     lines = [line.strip() for line in text.split('\n')]
-    
+
     cleaned_lines = []
     prev_line = None
     for line in lines:
@@ -101,11 +119,11 @@ def clean_ocr_text(text: str) -> str:
         elif not line and prev_line:
             cleaned_lines.append('')
             prev_line = None
-    
+
     text = '\n'.join(cleaned_lines)
     text = re.sub(r' {2,}', ' ', text)
     text = re.sub(r'([a-z,])\n([a-z])', r'\1 \2', text)
-    
+
     return text.strip()
 
 
@@ -151,6 +169,13 @@ def _ocr_pdf_page(
     retry_dpi: int,
     progress_callback: Optional[Callable[..., None]] = None,
 ) -> str:
+    """Render satu halaman PDF menjadi gambar lalu kirim ke OCR engine.
+
+    Mode 'api': kirim PNG bytes ke LLM Router API. Tidak ada retry-DPI
+    karena LLM dapat memproses gambar dengan resolusi apapun; kualitas
+    output tergantung pada akurasi model.
+    Mode 'local': gunakan PaddleOCR dengan retry-DPI jika teks < 20 char.
+    """
     _notify_progress(
         progress_callback,
         stage="ocr",
@@ -161,6 +186,34 @@ def _ocr_pdf_page(
     )
     page_pixmap = page.get_pixmap(dpi=dpi)
     image_bytes = page_pixmap.tobytes("png")
+
+    # Mode API: tidak ada retry-DPI; jeda ditangani oleh call_llm_ocr.
+    # Cukup delegasikan ke _ocr_image_bytes yang sudah menghandle routing.
+    if config.OCR_MODE == "api":
+        result_text = _ocr_image_bytes(image_bytes)
+        char_count = len(result_text)
+        if char_count < 20:
+            logger.warning(
+                f"[PDF][LLM-OCR] Halaman {page_number}/{total_page_count}: "
+                f"hasil sangat pendek ({char_count} karakter). "
+                "Halaman mungkin kosong, gambar buram, atau LLM gagal mengenali teks."
+            )
+        else:
+            logger.info(
+                f"[PDF][LLM-OCR] Halaman {page_number}/{total_page_count} selesai: "
+                f"{char_count} karakter diekstrak."
+            )
+        _notify_progress(
+            progress_callback,
+            stage="ocr",
+            message=f"OCR halaman {page_number}/{total_page_count} selesai (API, {char_count} chars).",
+            total_pages=total_page_count,
+            current_page=page_number,
+            used_ocr=True,
+        )
+        return result_text
+
+    # Mode local: PaddleOCR dengan retry-DPI
     cleaned_text = _clean_page_text(_ocr_image_bytes(image_bytes))
 
     if len(cleaned_text) < 20 and retry_dpi > dpi:
@@ -314,18 +367,17 @@ def extract_text_from_file(
         )
 
     elif file_extension in [".jpg", ".jpeg", ".png"]:
+        _notify_progress(progress_callback, stage="ocr", message="Memulai OCR gambar...", current_page=1, total_pages=1)
         try:
-            _notify_progress(progress_callback, stage="ocr", message="Memulai OCR gambar...", current_page=1, total_pages=1)
-            ocr_engine = get_ocr_engine()
-            ocr_result = ocr_engine.ocr(file_path)
+            with open(file_path, "rb") as img_f:
+                img_bytes = img_f.read()
+            extracted_text = _ocr_image_bytes(img_bytes)
         except Exception as e:
             logger.warning(f"[OCR] Gagal OCR image file {file_path}: {e}")
-            ocr_result = None
-
-        extracted_text = ""
-        if ocr_result and len(ocr_result) > 0 and ocr_result[0]:
-            extracted_text = "\n".join([line[1][0] for line in ocr_result[0] if line and len(line) > 1])
-        extracted_pages[1] = _clean_page_text(extracted_text)
+            extracted_text = ""
+        # Mode local: teks plain, perlu dibersihkan
+        # Mode api: output Markdown, _clean_page_text aman untuk Markdown
+        extracted_pages[1] = _clean_page_text(extracted_text) if config.OCR_MODE == "local" else extracted_text
         _notify_progress(progress_callback, stage="ocr", message="OCR gambar selesai.", current_page=1, total_pages=1)
 
     elif file_extension == ".docx":
@@ -488,21 +540,170 @@ def _build_plaintext_blocks(
     return blocks
 
 
+def _blocks_from_markdown(
+    text: str,
+    *,
+    page_number: int,
+    source_kind: str = "ocr",
+    block_order_start: int = 0,
+) -> List[dict]:
+    """Parse teks Markdown hasil LLM OCR menjadi dictionary block standar.
+
+    Menghasilkan struktur yang IDENTIK dengan output ekstraksi lokal sehingga
+    pipeline chunking & embedding tidak perlu diubah.
+
+    Elemen yang dikenali:
+    - Heading  : baris dimulai dengan # s/d ######
+    - Tabel    : sekelompok baris dengan format | ... | ... |
+    - Gambar   : ![...](...)  → paragraph pendek
+    - Lainnya  : paragraph / list_item
+    """
+    blocks: List[dict] = []
+    heading_path: List[str] = []
+    block_order = block_order_start
+
+    lines = (text or "").splitlines()
+    i = 0
+    n = len(lines)
+
+    # --- regex helpers ---
+    _heading_re = re.compile(r"^(#{1,6})\s+(.+)$")
+    _table_border_re = re.compile(r"^\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)+\|?\s*$")
+    _table_row_re = re.compile(r"^\|.+\|\s*$")
+    _list_re = re.compile(r"^(\d+[\.\)]|[-*]|[a-zA-Z][\.\)])\s+")
+
+    def _make_block(
+        btype: str,
+        btext: str,
+        hlevel: Optional[int],
+        htext: str,
+        hpath: List[str],
+        skind: str,
+    ) -> dict:
+        return {
+            "page_number": page_number,
+            "text": btext.strip(),
+            "block_type": btype,
+            "heading_level": hlevel,
+            "heading_text": htext,
+            "heading_path": list(hpath),
+            "source_kind": skind,
+            "block_order": 0,  # akan di-assign ulang di bawah
+            "metadata": {},
+        }
+
+    while i < n:
+        raw_line = lines[i]
+        stripped = raw_line.strip()
+
+        # --- Lewati baris kosong ---
+        if not stripped:
+            i += 1
+            continue
+
+        # --- Heading ---
+        m_heading = _heading_re.match(stripped)
+        if m_heading:
+            level = len(m_heading.group(1))
+            heading_text = m_heading.group(2).strip()
+            heading_path = heading_path[: level - 1] + [heading_text]
+            blk = _make_block(
+                "heading", heading_text, level, heading_text, heading_path, source_kind
+            )
+            blocks.append(blk)
+            i += 1
+            continue
+
+        # --- Tabel Markdown ---
+        if _table_row_re.match(stripped):
+            table_lines: List[str] = []
+            while i < n and (_table_row_re.match(lines[i].strip()) or _table_border_re.match(lines[i].strip())):
+                table_lines.append(lines[i].strip())
+                i += 1
+
+            # Pisahkan header, border, dan baris data
+            header_row: List[str] = []
+            data_rows: List[List[str]] = []
+            for tl in table_lines:
+                if _table_border_re.match(tl):
+                    continue  # Abaikan baris pemisah
+                cells = [c.strip() for c in tl.strip("|").split("|")]
+                if not header_row:
+                    header_row = cells
+                else:
+                    data_rows.append(cells)
+
+            if not header_row:
+                continue
+
+            header_text = " | ".join(header_row)
+            current_heading_text = heading_path[-1] if heading_path else ""
+
+            if not data_rows:
+                # Tabel hanya header
+                blk = _make_block("table_row", header_text, None, current_heading_text, heading_path, "table")
+                blk["metadata"] = {"is_header": True}
+                blocks.append(blk)
+            else:
+                for data_cells in data_rows:
+                    if not any(c for c in data_cells):
+                        continue
+                    row_text = " | ".join(data_cells)
+                    combined = f"{header_text}\n{row_text}"
+                    blk = _make_block("table_row", combined, None, current_heading_text, heading_path, "table")
+                    blk["metadata"] = {"header_row": header_row}
+                    blocks.append(blk)
+            continue
+
+        # --- Paragraph / List Item ---
+        paragraph_lines = []
+        while i < n and lines[i].strip() and not _heading_re.match(lines[i].strip()) and not _table_row_re.match(lines[i].strip()):
+            paragraph_lines.append(lines[i].strip())
+            i += 1
+        paragraph_text = " ".join(paragraph_lines).strip()
+        if not paragraph_text:
+            continue
+
+        btype = "list_item" if _list_re.match(paragraph_text) else "paragraph"
+        current_heading_text = heading_path[-1] if heading_path else ""
+        blk = _make_block(btype, paragraph_text, None, current_heading_text, heading_path, source_kind)
+        blocks.append(blk)
+
+    # Assign block_order secara berurutan
+    for idx, blk in enumerate(blocks):
+        blk["block_order"] = block_order_start + idx
+
+    return blocks
+
+
 def build_blocks_from_extracted_pages(
     extracted_pages: Dict[int, str],
     *,
     source_kind: str = "ocr",
 ) -> list[dict]:
-    """Build structured blocks from already extracted page text."""
+    """Build structured blocks from already extracted page text.
+
+    Secara otomatis memilih parser berdasarkan config.OCR_MODE:
+    - 'api'  : _blocks_from_markdown (output LLM)
+    - 'local': _build_plaintext_blocks (PaddleOCR plain text)
+    """
     blocks: list[dict] = []
     block_order = 0
     for page_number, page_text in sorted(extracted_pages.items(), key=lambda item: item[0]):
-        page_blocks = _build_plaintext_blocks(
-            page_text,
-            page_number=page_number,
-            source_kind=source_kind,
-            block_order_start=block_order,
-        )
+        if config.OCR_MODE == "api":
+            page_blocks = _blocks_from_markdown(
+                page_text,
+                page_number=page_number,
+                source_kind=source_kind,
+                block_order_start=block_order,
+            )
+        else:
+            page_blocks = _build_plaintext_blocks(
+                page_text,
+                page_number=page_number,
+                source_kind=source_kind,
+                block_order_start=block_order,
+            )
         blocks.extend(page_blocks)
         block_order += len(page_blocks)
     return blocks
@@ -751,6 +952,9 @@ def extract_blocks_from_file(
             return_pages=False,
             progress_callback=progress_callback,
         )
+        # Mode api: hasil sudah Markdown, gunakan parser Markdown
+        if config.OCR_MODE == "api":
+            return _blocks_from_markdown(full_text, page_number=1, source_kind="ocr")
         return _build_plaintext_blocks(full_text, page_number=1, source_kind="ocr")
 
     raise ValueError(f"Format file {file_extension} belum didukung untuk block extraction.")

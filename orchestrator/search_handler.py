@@ -150,16 +150,12 @@ async def check_relevance_with_ai(
         score = candidate.get("final_score", 0)
         content_for_check = candidate.get("content_for_check", "")
         
-        # High score bypass: skip AI check jika final_score >= 0.90
-        # Gunakan final_score (bukan dense_score) karena final_score sudah
-        # memperhitungkan quality penalty dari search.py.
         if candidate.get("final_score", 0) >= 0.90:
             logger.info(f"  [{idx+1}] {source.upper()}: score={score:.4f} → HIGH SCORE, SKIP AI CHECK ✓")
             selected_candidate = candidate
             ai_reason = f"High confidence score (final >= 0.90)"
             break
         
-        # AI Relevance Check
         logger.info(f"  [{idx+1}] {source.upper()}: score={score:.4f} → Checking relevance...")
         relevance_result = await ai_check_relevance(user_question, content_for_check)
         

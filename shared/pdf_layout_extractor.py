@@ -504,12 +504,32 @@ def extract_pdf_layout(
                 # Halaman scan: gunakan OCR, skip table injection
                 # (struktur tabel hilang saat discan — tidak bisa diandalkan)
                 ocr_text = ocr_page_callback(page_number, document[page_index])
-                ocr_blocks = _blocks_from_plain_text(
-                    ocr_text,
-                    page_number=page_number,
-                    source_kind=source_kind,
-                    block_order_start=block_order,
-                )
+
+                # Pilih parser sesuai OCR_MODE:
+                # - 'api'  : LLM mengeluarkan Markdown → gunakan _blocks_from_markdown
+                # - 'local': PaddleOCR mengeluarkan plain text → gunakan _blocks_from_plain_text
+                try:
+                    from config import config as _cfg
+                    _use_markdown = _cfg.OCR_MODE == "api"
+                except Exception:
+                    _use_markdown = False
+
+                if _use_markdown:
+                    from shared.ocr_utils import _blocks_from_markdown
+                    ocr_blocks = _blocks_from_markdown(
+                        ocr_text,
+                        page_number=page_number,
+                        source_kind=source_kind,
+                        block_order_start=block_order,
+                    )
+                else:
+                    ocr_blocks = _blocks_from_plain_text(
+                        ocr_text,
+                        page_number=page_number,
+                        source_kind=source_kind,
+                        block_order_start=block_order,
+                    )
+
                 if ocr_blocks:
                     pages[page_number] = _page_text_from_legacy_blocks(ocr_blocks)
                     all_blocks.extend(ocr_blocks)

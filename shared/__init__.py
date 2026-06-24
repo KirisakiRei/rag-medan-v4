@@ -32,7 +32,8 @@ from shared.prompts import (
     PROMPT_PRE_FILTER_USULAN,
     PROMPT_RELEVANCE_RAG,
     PROMPT_RELEVANCE_USULAN,
-    PROMPT_RERANK
+    PROMPT_RERANK,
+    PROMPT_LLM_OCR,
 )
 from shared.ocr_utils import (
     extract_text_from_file,
@@ -83,6 +84,7 @@ __all__ = [
     "PROMPT_RELEVANCE_RAG",
     "PROMPT_RELEVANCE_USULAN",
     "PROMPT_RERANK",
+    "PROMPT_LLM_OCR",
     
     # OCR Utils
     "extract_text_from_file",
