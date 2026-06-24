@@ -149,7 +149,8 @@ async def call_filter_llm(
                     {"role": "user", "content": user_message.strip()}
                 ],
                 "temperature": temperature,
-                "max_tokens": max_tokens
+                "max_tokens": max_tokens,
+                "stream": False
             }
             
             headers = {
