@@ -66,12 +66,14 @@ class Config:
     COLLECTION_WEB_STATE = _env("COLLECTION_WEB_STATE", "web_scraping_state")
     COLLECTION_USULAN = _env("COLLECTION_USULAN", "usulan_bank")
     
-    # LLM Configuration (Gemini)
+    # LLM Configuration
     LLM_BASE_URL = _env("LLM_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/models")
     LLM_API_KEY = _env("LLM_API_KEY", "")
     LLM_MODEL = _env("LLM_MODEL", "gemini-2.0-flash")
     LLM_TIMEOUT = _env("LLM_TIMEOUT_SEC", 60, int)
-    LLM_PROVIDER = _env("LLM_PROVIDER", "gemini")
+    LLM_PROVIDER = _env("LLM_PROVIDER", "gemini") # "gemini" atau "router"
+    
+    ENABLE_CITATION = _env("ENABLE_CITATION", "true", bool)
     
     # Database Configuration
     DB_HOST = _env("DB_HOST", "localhost")

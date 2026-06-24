@@ -10,7 +10,7 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import config
-from shared.filtering import ai_pre_filter, ai_check_relevance
+from shared.filtering import ai_pre_filter, ai_check_relevance, ai_extract_answer
 from shared.utils import normalize_text, clean_location_terms, detect_category
 from orchestrator.service_client import call_service_safe
 from orchestrator.aggregation import aggregate_and_sort_candidates
@@ -432,6 +432,32 @@ async def unified_search(
     selected_candidate, ai_reason, candidates_checked, relevance_duration = \
         await check_relevance_with_ai(all_candidates, user_question, max_check=5)
     
+    # 5.5 AI EXTRACTION FOR DOCUMENT & WEB
+    if selected_candidate:
+        source = selected_candidate.get("source", "unknown")
+        if source in ["document", "web"]:
+            logger.info(f"[AI-EXTRACT] Extracting answer from {source.upper()}...")
+            extract_start = time.time()
+            raw_text = selected_candidate.get("answer_doc", "")
+            
+            # Prepare metadata
+            metadata = {}
+            if source == "document":
+                metadata = selected_candidate.get("document_info", {})
+            elif source == "web":
+                metadata = selected_candidate.get("web_info", {})
+                
+            extracted_answer = await ai_extract_answer(
+                user_question, 
+                raw_text, 
+                source, 
+                metadata
+            )
+            
+            selected_candidate["answer_doc"] = extracted_answer
+            extract_duration = time.time() - extract_start
+            logger.info(f"[AI-EXTRACT] Done in {extract_duration:.2f}s")
+            
     total_duration = time.time() - start_time
     
     # 6. BUILD RESPONSE

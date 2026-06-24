@@ -110,16 +110,24 @@ async def _expand_document_context(payload: Dict[str, Any]) -> str:
 
     parent_text = (parent_payload.get("text", "") if parent_payload else "") or ""
 
+    # Cek karakter gantung di akhir teks (Context Fragmentation fix)
+    has_dangling = False
+    if text:
+        last_char = text.strip()[-1:] if text.strip() else ""
+        if last_char in (":", "-", ",", "—"):
+            has_dangling = True
+
+    if has_dangling and next_payload:
+        # Paksa injeksi next chunk karena teks terpotong gantung
+        expanded = f"{text}\n\n{next_payload.get('text', '')}"
+        return format_for_display(expanded)
+
     # Gunakan parent jika parent JAUH lebih informatif dari child.
     # Threshold: parent harus minimal 2x lebih panjang dan >450 char.
-    # Jika tidak, parent mungkin juga pendek (misal: PDF ebook/scan yg OCR-nya
-    # hanya menangkap judul+alamat) — dalam kasus ini window sibling lebih berguna.
     if parent_payload and len(parent_text) >= max(450, len(text) * 2):
         return format_for_display(parent_text)
 
     # Window expansion: prev_sibling + self + next_sibling
-    # Ini sangat penting untuk ebook/majalah dimana paragraf deskripsi
-    # sering menjadi sibling chunk (window_next) dari chunk judul/alamat.
     parts = []
     if prev_payload:
         parts.append(prev_payload.get("text", ""))

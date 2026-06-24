@@ -438,11 +438,6 @@ def _split_section_into_children(
                 current_blocks.append(piece)
 
     flush_current()
-
-    for index, item in enumerate(child_items):
-        item.window_prev_id = child_items[index - 1].chunk_id if index > 0 else None
-        item.window_next_id = child_items[index + 1].chunk_id if index < len(child_items) - 1 else None
-
     return child_items
 
 
@@ -530,6 +525,13 @@ def structure_chunk_document(
         current_section_tokens = projected_tokens
 
     flush_section()
+    
+    # Global pass for window_prev_id and window_next_id across all sections
+    child_items = [item for item in all_items if item.chunk_level == "child"]
+    for index, item in enumerate(child_items):
+        item.window_prev_id = child_items[index - 1].chunk_id if index > 0 else None
+        item.window_next_id = child_items[index + 1].chunk_id if index < len(child_items) - 1 else None
+        
     return all_items
 
 

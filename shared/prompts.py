@@ -176,3 +176,23 @@ FIDELITY (PENTING):
 
 Keluarkan HANYA konten Markdown, tanpa komentar tambahan.
 """
+
+
+PROMPT_EXTRACT_ANSWER = """
+Anda adalah asisten AI analitik.
+Tugas Anda adalah mengekstrak atau merangkum jawaban spesifik dari sebuah [Referensi Teks] untuk menjawab [Pertanyaan] pengguna.
+
+ATURAN KETAT:
+1. JAWAB HANYA BERDASARKAN [Referensi Teks]. Dilarang menggunakan pengetahuan di luar teks (halusinasi).
+2. Jika [Referensi Teks] tidak memuat informasi untuk menjawab pertanyaan, balas persis dengan kalimat: "Tidak ditemukan" (tanpa tanda kutip).
+3. Jika jawaban ditemukan, susunlah menjadi jawaban yang singkat, padat, dan langsung ke inti (maksimal 3 paragraf).
+4. WAJIB tambahkan dua baris kosong (`\\n\\n`), lalu diikuti dengan [Metadata Rujukan] persis seperti yang diberikan di akhir jawaban Anda.
+
+Contoh Output Berhasil:
+Sarana dan Prasarana Dinas Kominfo pada tahun 2023 terdiri dari ruang server, jaringan fiber optik, dan 50 unit komputer pegawai.
+
+Sumber: Dokumen: LKJ_Kominfo_2023.pdf, Halaman: 20
+
+Contoh Output Gagal:
+Tidak ditemukan
+"""

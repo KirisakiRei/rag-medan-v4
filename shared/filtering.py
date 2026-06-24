@@ -121,6 +121,64 @@ async def _call_gemini_llm(
             return None
 
 
+async def call_filter_llm(
+    system_prompt: str,
+    user_message: str,
+    temperature: float = 0.0,
+    max_tokens: int = 256
+) -> Optional[str]:
+    """Call LLM based on configured mode (Gemini or Router)."""
+    mode = config.LLM_PROVIDER.lower()
+    
+    if mode == "gemini":
+        return await _call_gemini_llm(system_prompt, user_message, temperature, max_tokens)
+        
+    # Router mode (OpenAI format)
+    semaphore = _get_semaphore()
+    async with semaphore:
+        try:
+            client = _get_gemini_client()
+            url = config.ROUTER_API_URL
+            api_key = get_cached_variable("router_api_key") or config.ROUTER_API_KEY
+            model_name = get_cached_variable("llm_model") or config.LLM_MODEL
+            
+            payload = {
+                "model": model_name,
+                "messages": [
+                    {"role": "system", "content": system_prompt.strip()},
+                    {"role": "user", "content": user_message.strip()}
+                ],
+                "temperature": temperature,
+                "max_tokens": max_tokens
+            }
+            
+            headers = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {api_key}"
+            }
+            
+            response = await client.post(url, headers=headers, json=payload)
+            if response.status_code != 200:
+                logger.error(f"[ROUTER] HTTP {response.status_code}: {response.text}")
+                logger.warning("[ROUTER] Falling back to Gemini...")
+                return await _call_gemini_llm(system_prompt, user_message, temperature, max_tokens)
+                
+            response_data = response.json()
+            choices = response_data.get("choices", [])
+            
+            if not choices:
+                logger.warning(f"[ROUTER] No choices in response")
+                return None
+                
+            content = choices[0].get("message", {}).get("content", "")
+            return content.strip()
+            
+        except Exception as e:
+            logger.error(f"[ROUTER] Error calling API: {e}")
+            logger.warning("[ROUTER] Falling back to Gemini...")
+            return await _call_gemini_llm(system_prompt, user_message, temperature, max_tokens)
+
+
 def _extract_json(text: str) -> Optional[Dict]:
     """Extract JSON from text response, handling markdown code blocks."""
     if not text:
@@ -191,7 +249,7 @@ async def ai_pre_filter(question: str) -> Dict[str, Any]:
 
         prompt = get_cached_variable("prompt_pre_filter_rag") or PROMPT_PRE_FILTER_RAG
 
-        llm_response = await _call_gemini_llm(
+        llm_response = await call_filter_llm(
             system_prompt=prompt,
             user_message=question,
             temperature=0.0,
@@ -235,7 +293,7 @@ async def ai_check_relevance(user_question: str, rag_result: str) -> Dict[str, A
         prompt = get_cached_variable("prompt_relevance_rag") or PROMPT_RELEVANCE_RAG
         user_prompt = f"User: {user_question}\nRAG Result: {rag_result}"
         
-        llm_response = await _call_gemini_llm(
+        llm_response = await call_filter_llm(
             system_prompt=prompt,
             user_message=user_prompt,
             temperature=0.1,
@@ -283,7 +341,7 @@ async def ai_pre_filter_usulan(user_input: str) -> Dict[str, str]:
 
         prompt = get_cached_variable("prompt_pre_filter_usulan") or PROMPT_PRE_FILTER_USULAN
 
-        llm_response = await _call_gemini_llm(
+        llm_response = await call_filter_llm(
             system_prompt=prompt,
             user_message=user_input,
             temperature=0.2,
@@ -314,7 +372,7 @@ async def ai_relevance_usulan(user_input: str, top_result: str) -> Dict[str, Any
         prompt = get_cached_variable("prompt_relevance_usulan") or PROMPT_RELEVANCE_USULAN
         user_prompt = f'Pertanyaan pengguna: "{user_input}"\nTopik hasil RAG: "{top_result}"'
 
-        llm_response = await _call_gemini_llm(
+        llm_response = await call_filter_llm(
             system_prompt=prompt,
             user_message=user_prompt,
             temperature=0.0,
@@ -383,7 +441,7 @@ async def ai_rerank_results(
 
         user_prompt = f"Question: {question}\n\n" + "\n\n".join(context_parts)
 
-        llm_response = await _call_gemini_llm(
+        llm_response = await call_filter_llm(
             system_prompt=PROMPT_RERANK,
             user_message=user_prompt,
             temperature=0.1,
@@ -433,3 +491,57 @@ def _fallback_rerank(text_results: list, document_results: list, web_results: li
         "should_combine": False,
         "combined_sources": []
     }
+
+
+async def ai_extract_answer(question: str, raw_text: str, source_type: str, metadata: Dict[str, Any]) -> str:
+    """
+    RAG Extraction: Summarize the exact answer from the chunk based on the question.
+    Only called for document and web sources.
+    """
+    try:
+        from shared.prompts import PROMPT_EXTRACT_ANSWER
+        
+        logger.info(f"[AI-EXTRACT] Extracting answer for source_type={source_type}...")
+        
+        prompt = get_cached_variable("prompt_extract_answer") or PROMPT_EXTRACT_ANSWER
+        
+        # Check citation toggle
+        enable_citation_str = get_cached_variable("enable_citation")
+        if enable_citation_str is not None:
+            enable_citation = str(enable_citation_str).lower() in ("true", "1", "yes")
+        else:
+            enable_citation = config.ENABLE_CITATION
+            
+        # Prepare citation metadata text
+        citation_text = ""
+        if enable_citation:
+            if source_type == "document":
+                filename = metadata.get("filename", "-")
+                page = metadata.get("page_number", "-")
+                citation_text = f"Dokumen: {filename}, Halaman: {page}"
+            elif source_type == "web":
+                url = metadata.get("url", metadata.get("link", "-"))
+                citation_text = f"URL: {url}"
+        else:
+            # If citation is disabled, override the prompt instruction
+            prompt += "\nPERHATIAN: DILARANG MENULISKAN ATAU MENYEBUTKAN SUMBER/REFERENSI APAPUN. BERIKAN JAWABAN SAJA."
+            
+        user_prompt = f"Pertanyaan: {question}\nReferensi Teks:\n{raw_text}\n\n"
+        if citation_text:
+            user_prompt += f"Metadata Rujukan:\n{citation_text}"
+
+        llm_response = await call_filter_llm(
+            system_prompt=prompt,
+            user_message=user_prompt,
+            temperature=0.1,
+            max_tokens=350
+        )
+
+        if not llm_response:
+            return raw_text # Fallback to raw text
+
+        return llm_response.strip()
+
+    except Exception as e:
+        logger.error(f"[AI-EXTRACT] Error: {e}")
+        return raw_text
