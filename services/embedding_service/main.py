@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 from config import config
 from shared.logging_config import setup_logging
+from shared.security import InternalAuthMiddleware
 from services.embedding_service.models import EmbedRequest, EmbedResponse
 
 logger = setup_logging("embedding_service")
@@ -117,6 +118,8 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan
 )
+
+app.add_middleware(InternalAuthMiddleware)
 
 
 # ============== ENDPOINTS ==============

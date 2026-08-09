@@ -17,6 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import config
 from shared.logging_config import setup_logging
+from shared.security import InternalAuthMiddleware
 
 # Import modules
 from orchestrator.models import (
@@ -67,6 +68,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Proteksi seluruh /api/* dengan header X-API-Key (payload tidak berubah).
+app.add_middleware(InternalAuthMiddleware)
 
 # ============== HEALTH ENDPOINTS ==============
 

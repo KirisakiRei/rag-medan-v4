@@ -283,7 +283,8 @@ def _get_embed_client() -> httpx.AsyncClient:
     if _embed_client is None or _embed_client.is_closed:
         _embed_client = httpx.AsyncClient(
             base_url=config.SHARED_EMBEDDING_URL,
-            timeout=120.0
+            timeout=120.0,
+            headers={"X-API-Key": config.INTERNAL_API_KEY},
         )
     return _embed_client
 

@@ -526,11 +526,17 @@ def structure_chunk_document(
 
     flush_section()
     
-    # Global pass for window_prev_id and window_next_id across all sections
-    child_items = [item for item in all_items if item.chunk_level == "child"]
-    for index, item in enumerate(child_items):
-        item.window_prev_id = child_items[index - 1].chunk_id if index > 0 else None
-        item.window_next_id = child_items[index + 1].chunk_id if index < len(child_items) - 1 else None
+    # Set sibling windows only inside the same parent section.
+    children_by_parent: Dict[str, List[ChunkItem]] = {}
+    for item in all_items:
+        if item.chunk_level != "child" or not item.parent_chunk_id:
+            continue
+        children_by_parent.setdefault(item.parent_chunk_id, []).append(item)
+
+    for siblings in children_by_parent.values():
+        for index, item in enumerate(siblings):
+            item.window_prev_id = siblings[index - 1].chunk_id if index > 0 else None
+            item.window_next_id = siblings[index + 1].chunk_id if index < len(siblings) - 1 else None
         
     return all_items
 

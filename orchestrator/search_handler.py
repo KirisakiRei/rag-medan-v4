@@ -10,8 +10,15 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import config
-from shared.filtering import ai_pre_filter, ai_check_relevance, ai_extract_answer
+from shared.filtering import (
+    ai_pre_filter,
+    ai_check_relevance,
+    ai_check_batch_relevance,
+    ai_extract_answer,
+    get_relevance_mode,
+)
 from shared.utils import normalize_text, clean_location_terms, detect_category
+from orchestrator.answer_validation import validate_extracted_answer
 from orchestrator.service_client import call_service_safe
 from orchestrator.aggregation import aggregate_and_sort_candidates
 
@@ -175,6 +182,90 @@ async def check_relevance_with_ai(
     return selected_candidate, ai_reason, candidates_checked, relevance_duration
 
 
+async def check_relevance_batch_with_ai(
+    all_candidates: List[Dict[str, Any]],
+    user_question: str,
+    max_check: int = 5,
+) -> tuple[Dict[str, Any] | None, str, int, float]:
+    """Check ordered candidates in one AI request, with single-mode fallback."""
+    relevance_start = time.time()
+    batch_candidates = all_candidates[:min(max_check, len(all_candidates))]
+
+    if not batch_candidates:
+        return None, "Tidak ada kandidat untuk diperiksa", 0, 0.0
+
+    top_candidate = batch_candidates[0]
+    top_score = top_candidate.get("final_score", 0)
+    if top_score >= 0.90:
+        logger.info(
+            f"[AI-RELEVANCE] BATCH: top score={top_score:.4f} -> HIGH SCORE, SKIP AI CHECK ✓"
+        )
+        return (
+            top_candidate,
+            "High confidence score (final >= 0.90)",
+            1,
+            time.time() - relevance_start,
+        )
+
+    logger.info(
+        f"[AI-RELEVANCE] BATCH: checking {len(batch_candidates)} candidates in one request"
+    )
+    batch_result = await ai_check_batch_relevance(user_question, batch_candidates)
+
+    if batch_result is None:
+        batch_duration = time.time() - relevance_start
+        logger.warning(
+            "[AI-RELEVANCE] Batch response invalid, falling back to single mode"
+        )
+        selected, reason, checked, single_duration = await check_relevance_with_ai(
+            all_candidates,
+            user_question,
+            max_check=max_check,
+        )
+        return selected, reason, checked, batch_duration + single_duration
+
+    ai_reason = batch_result.get("reason", "-")
+    if not batch_result.get("relevant", False):
+        relevance_duration = time.time() - relevance_start
+        logger.info(
+            f"[AI-RELEVANCE] BATCH: no relevant candidate | reason={ai_reason[:100]}"
+        )
+        return None, ai_reason, len(batch_candidates), relevance_duration
+
+    selected_rank = batch_result["selected_rank"]
+    selected_candidate = batch_candidates[selected_rank - 1]
+    relevance_duration = time.time() - relevance_start
+    logger.info(
+        f"[AI-RELEVANCE] BATCH: selected rank={selected_rank} "
+        f"source={selected_candidate.get('source', 'unknown').upper()} "
+        f"score={selected_candidate.get('final_score', 0):.4f}"
+    )
+    return selected_candidate, ai_reason, len(batch_candidates), relevance_duration
+
+
+async def check_relevance_by_mode(
+    all_candidates: List[Dict[str, Any]],
+    user_question: str,
+    max_check: int = 5,
+) -> tuple[Dict[str, Any] | None, str, int, float]:
+    """Dispatch relevance checking using the configured single or batch mode."""
+    relevance_mode = get_relevance_mode()
+    logger.info(f"[AI-RELEVANCE] Mode: {relevance_mode.upper()}")
+
+    if relevance_mode == "batch":
+        return await check_relevance_batch_with_ai(
+            all_candidates,
+            user_question,
+            max_check=max_check,
+        )
+
+    return await check_relevance_with_ai(
+        all_candidates,
+        user_question,
+        max_check=max_check,
+    )
+
+
 def build_success_response(
     selected_candidate: Dict[str, Any],
     user_question: str,
@@ -266,10 +357,11 @@ def build_low_confidence_response(
     relevance_duration: float,
     parallel_duration: float,
     total_duration: float,
-    services_queried: int = 3
+    services_queried: int = 3,
+    selected_candidate_override: Dict[str, Any] | None = None
 ) -> Dict[str, Any]:
     """Build low confidence response payload."""
-    top_candidate = all_candidates[0] if all_candidates else {}
+    top_candidate = selected_candidate_override or (all_candidates[0] if all_candidates else {})
     source = top_candidate.get("source", "none")
     
     similar_question = {
@@ -430,7 +522,8 @@ async def unified_search(
     
     # 5. AI RELEVANCE CHECK
     selected_candidate, ai_reason, candidates_checked, relevance_duration = \
-        await check_relevance_with_ai(all_candidates, user_question, max_check=5)
+        await check_relevance_by_mode(all_candidates, user_question, max_check=5)
+    extraction_failure_candidate = None
     
     # 5.5 AI EXTRACTION FOR DOCUMENT & WEB
     if selected_candidate:
@@ -453,8 +546,19 @@ async def unified_search(
                 source, 
                 metadata
             )
+
+            is_valid_answer, invalid_reason = validate_extracted_answer(extracted_answer)
+            if is_valid_answer:
+                selected_candidate["answer_doc"] = extracted_answer.strip()
+                logger.info("[AI-EXTRACT] Valid answer accepted")
+            else:
+                selected_candidate["answer_doc"] = "Tidak ditemukan"
+                selected_candidate["note"] = f"invalid_extraction_{invalid_reason}"
+                extraction_failure_candidate = selected_candidate
+                selected_candidate = None
+                ai_reason = f"AI extraction rejected: {invalid_reason}"
+                logger.warning(f"[AI-EXTRACT] Invalid answer rejected: {invalid_reason}")
             
-            selected_candidate["answer_doc"] = extracted_answer
             extract_duration = time.time() - extract_start
             logger.info(f"[AI-EXTRACT] Done in {extract_duration:.2f}s")
             
@@ -490,5 +594,6 @@ async def unified_search(
             relevance_duration,
             parallel_duration,
             total_duration,
-            services_queried
+            services_queried,
+            extraction_failure_candidate
         )

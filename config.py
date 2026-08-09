@@ -33,7 +33,6 @@ class Config:
     
     # API Configuration
     API_HOST = _env("API_HOST", "0.0.0.0")
-    DEBUG = _env("DEBUG", "false", bool)
     
     # Service Ports (internal communication)
     ORCHESTRATOR_PORT = _env("ORCHESTRATOR_PORT", 5000, int)
@@ -72,6 +71,7 @@ class Config:
     LLM_MODEL = _env("LLM_MODEL", "gemini-2.0-flash")
     LLM_TIMEOUT = _env("LLM_TIMEOUT_SEC", 60, int)
     LLM_PROVIDER = _env("LLM_PROVIDER", "gemini") # "gemini" atau "router"
+    RELEVANCE_MODE = _env("RELEVANCE_MODE", "single")
     
     ENABLE_CITATION = _env("ENABLE_CITATION", "true", bool)
     
@@ -83,8 +83,6 @@ class Config:
     DB_PASSWORD = _env("DB_PASSWORD", "")
     
     # OCR Configuration
-    OCR_ENGINE = _env("OCR_ENGINE", "paddle")
-    OCR_LANG = _env("OCR_LANG", "id")
     OCR_TIMEOUT = _env("OCR_TIMEOUT", 1800, int)  # default 30 menit
     OCR_STALL_TIMEOUT = _env("OCR_STALL_TIMEOUT", 300, int)
     OCR_HARD_TIMEOUT = _env("OCR_HARD_TIMEOUT", 21600, int)
@@ -109,19 +107,6 @@ class Config:
     # RAG Configuration
     USE_POST_SUMMARY = _env("USE_POST_SUMMARY", "false", bool)
     POST_SUMMARY_TOP_K = _env("POST_SUMMARY_TOP_K", 2, int)
-    
-    # Search Thresholds
-    TEXT_DENSE_THRESHOLD = _env("TEXT_DENSE_THRESHOLD", 0.83, float)
-    TEXT_OVERLAP_THRESHOLD = _env("TEXT_OVERLAP_THRESHOLD", 0.15, float)
-    DOCUMENT_SCORE_THRESHOLD = _env("DOCUMENT_SCORE_THRESHOLD", 0.4, float)
-    WEB_SCORE_THRESHOLD = _env("WEB_SCORE_THRESHOLD", 0.5, float)
-    USULAN_SCORE_THRESHOLD = _env("USULAN_SCORE_THRESHOLD", 0.85, float)
-    
-    # Reranking Configuration
-    RERANK_TOP_K = _env("RERANK_TOP_K", 5, int)
-    RERANK_WEIGHT_TEXT = _env("RERANK_WEIGHT_TEXT", 0.4, float)
-    RERANK_WEIGHT_DOC = _env("RERANK_WEIGHT_DOC", 0.35, float)
-    RERANK_WEIGHT_WEB = _env("RERANK_WEIGHT_WEB", 0.25, float)
     
     # Chunking Configuration (Document & Web)
     # Nilai dikalibrasi untuk model E5 Large (multilingual, batas 512 token).
@@ -166,7 +151,12 @@ class Config:
     
     # CORS
     CORS_ORIGINS: List[str] = _env("CORS_ORIGINS", "*", list) or ["*"]
-    
+
+    # Internal API Key (autentikasi antar service via header X-API-Key)
+    # Fail-closed: jika kosong, semua request selain allowlist ditolak 401.
+    # Tidak mengubah struktur payload; key hanya dikirim via header.
+    INTERNAL_API_KEY = _env("INTERNAL_API_KEY", "")
+
     # ============== OPTIMIZATION CONFIGS ==============
     
     # Gemini concurrency limiter (max parallel Gemini API calls)

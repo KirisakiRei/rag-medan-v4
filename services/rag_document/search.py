@@ -79,6 +79,22 @@ def _extract_payload_and_score(point: Any) -> tuple[Dict[str, Any], float]:
     return dict(payload), float(score or 0.0)
 
 
+def _deduplicate_document_hits(result_points: List[Any]) -> List[Any]:
+    """Keep the highest-scoring child hit for each parent section."""
+    unique_hits: Dict[str, tuple[Any, float]] = {}
+
+    for index, point in enumerate(result_points):
+        payload, score = _extract_payload_and_score(point)
+        parent_chunk_id = payload.get("parent_chunk_id")
+        dedup_key = str(parent_chunk_id) if parent_chunk_id else f"point:{index}"
+        existing = unique_hits.get(dedup_key)
+
+        if existing is None or score > existing[1]:
+            unique_hits[dedup_key] = (point, score)
+
+    return [item[0] for item in sorted(unique_hits.values(), key=lambda item: item[1], reverse=True)]
+
+
 async def _retrieve_payloads_by_ids(point_ids: List[str]) -> Dict[str, Dict[str, Any]]:
     valid_ids = [point_id for point_id in point_ids if point_id]
     if not valid_ids:
@@ -109,6 +125,21 @@ async def _expand_document_context(payload: Dict[str, Any]) -> str:
     next_payload = related_payloads.get(str(payload.get("window_next_id")))
 
     parent_text = (parent_payload.get("text", "") if parent_payload else "") or ""
+    parent_chunk_id = str(payload.get("parent_chunk_id") or "")
+
+    # Parent menyimpan konteks section lengkap dari child yang cocok.
+    if parent_text:
+        return format_for_display(parent_text)
+
+    # Fallback sibling hanya boleh memakai child dari parent yang sama.
+    if parent_chunk_id:
+        if prev_payload and str(prev_payload.get("parent_chunk_id") or "") != parent_chunk_id:
+            prev_payload = None
+        if next_payload and str(next_payload.get("parent_chunk_id") or "") != parent_chunk_id:
+            next_payload = None
+    else:
+        prev_payload = None
+        next_payload = None
 
     # Cek karakter gantung di akhir teks (Context Fragmentation fix)
     has_dangling = False
@@ -122,11 +153,6 @@ async def _expand_document_context(payload: Dict[str, Any]) -> str:
         expanded = f"{text}\n\n{next_payload.get('text', '')}"
         return format_for_display(expanded)
 
-    # Gunakan parent jika parent JAUH lebih informatif dari child.
-    # Threshold: parent harus minimal 2x lebih panjang dan >450 char.
-    if parent_payload and len(parent_text) >= max(450, len(text) * 2):
-        return format_for_display(parent_text)
-
     # Window expansion: prev_sibling + self + next_sibling
     parts = []
     if prev_payload:
@@ -136,11 +162,6 @@ async def _expand_document_context(payload: Dict[str, Any]) -> str:
         parts.append(next_payload.get("text", ""))
 
     expanded = "\n\n".join(part for part in parts if part and part.strip())
-
-    # Jika window expansion tidak menambah informasi berarti,
-    # fallback ke parent (meskipun pendek) agar minimal ada konteks section.
-    if len(expanded) <= len(text) + 20 and parent_text:
-        return format_for_display(parent_text)
 
     return format_for_display(expanded or text)
 
@@ -276,6 +297,12 @@ async def search_document_unified(
         qdrant_duration = time.time() - qdrant_start
 
         result_points = _extract_query_points(qdrant_hits)
+        unique_result_points = _deduplicate_document_hits(result_points)
+        if len(unique_result_points) != len(result_points):
+            logger.info(
+                f"[DOC-SEARCH] Deduplicated child hits: {len(result_points)} -> {len(unique_result_points)} parent sections"
+            )
+        result_points = unique_result_points
 
         if not result_points:
             total_duration = time.time() - start_time

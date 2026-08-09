@@ -8,7 +8,7 @@ import re
 import time
 import logging
 import httpx
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, List, Optional, Tuple
 
 from config import config
 from shared.db import get_variable
@@ -17,6 +17,7 @@ from shared.prompts import (
     PROMPT_PRE_FILTER_RAG,
     PROMPT_PRE_FILTER_USULAN,
     PROMPT_RELEVANCE_RAG,
+    PROMPT_AI_BATCH_RELEVANCE,
     PROMPT_RELEVANCE_USULAN,
     PROMPT_RERANK
 )
@@ -63,6 +64,25 @@ def get_cached_variable(key: str) -> Optional[str]:
         if key in _prompt_cache:
             return _prompt_cache[key][0]
         return None
+
+
+def get_relevance_mode() -> str:
+    """Resolve relevance mode from database variable with config fallback."""
+    database_mode = get_cached_variable("relevance_mode")
+    configured_mode = (
+        database_mode
+        if str(database_mode or "").strip()
+        else config.RELEVANCE_MODE
+    )
+    relevance_mode = str(configured_mode or "single").strip().lower()
+
+    if relevance_mode not in {"single", "batch"}:
+        logger.warning(
+            f"[AI-RELEVANCE] Invalid relevance_mode='{relevance_mode}', falling back to single"
+        )
+        return "single"
+
+    return relevance_mode
 
 
 async def _call_gemini_llm(
@@ -333,6 +353,108 @@ async def ai_check_relevance(user_question: str, rag_result: str) -> Dict[str, A
         return {"relevant": True, "reason": f"Error: {str(e)[:50]}", "reformulated_question": ""}
 
 
+async def ai_check_batch_relevance(
+    user_question: str,
+    candidates: List[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """Evaluate ordered RAG candidates in one LLM request."""
+    batch_candidates = []
+    for rank, candidate in enumerate(candidates[:5], start=1):
+        content = str(candidate.get("content_for_check", "") or "")[:2000]
+        batch_candidates.append({
+            "rank": rank,
+            "source": candidate.get("source", "unknown"),
+            "final_score": candidate.get("final_score", 0.0),
+            "content": content,
+        })
+
+    if not batch_candidates:
+        return {
+            "relevant": False,
+            "selected_rank": None,
+            "reason": "Tidak ada kandidat untuk diperiksa",
+            "reformulated_question": "",
+        }
+
+    try:
+        prompt = (
+            get_cached_variable("prompt_ai_batch_relevance")
+            or PROMPT_AI_BATCH_RELEVANCE
+        )
+        user_message = json.dumps(
+            {
+                "user_question": user_question,
+                "candidates": batch_candidates,
+            },
+            ensure_ascii=False,
+        )
+
+        logger.info(
+            f"[AI-BATCH] Checking {len(batch_candidates)} ordered candidates in one request"
+        )
+        llm_response = await call_filter_llm(
+            system_prompt=prompt,
+            user_message=user_message,
+            temperature=0.0,
+        )
+
+        if not llm_response:
+            logger.warning("[AI-BATCH] Empty LLM response")
+            return None
+
+        parsed = _extract_json(llm_response)
+        if not parsed or not isinstance(parsed, dict):
+            logger.warning("[AI-BATCH] Invalid JSON response")
+            return None
+
+        relevant = parsed.get("relevant")
+        selected_rank = parsed.get("selected_rank")
+        if type(relevant) is not bool:
+            logger.warning("[AI-BATCH] Field 'relevant' must be boolean")
+            return None
+
+        if relevant:
+            if (
+                isinstance(selected_rank, bool)
+                or not isinstance(selected_rank, int)
+                or selected_rank < 1
+                or selected_rank > len(batch_candidates)
+            ):
+                logger.warning(
+                    f"[AI-BATCH] Invalid selected_rank={selected_rank} for {len(batch_candidates)} candidates"
+                )
+                return None
+        elif selected_rank is not None:
+            logger.warning("[AI-BATCH] selected_rank must be null when relevant=false")
+            return None
+
+        reason = parsed.get("reason")
+        reformulated_question = parsed.get("reformulated_question")
+        if not isinstance(reason, str):
+            logger.warning("[AI-BATCH] Field 'reason' must be a string")
+            return None
+        if not isinstance(reformulated_question, str):
+            logger.warning(
+                "[AI-BATCH] Field 'reformulated_question' must be a string"
+            )
+            return None
+
+        reformulated = reformulated_question.strip()
+        if len(reformulated.split()) > 12:
+            reformulated = " ".join(reformulated.split()[:12]) + "..."
+
+        return {
+            "relevant": relevant,
+            "selected_rank": selected_rank,
+            "reason": reason.strip() or "-",
+            "reformulated_question": reformulated,
+        }
+
+    except Exception as e:
+        logger.exception(f"[AI-BATCH] Error: {e}")
+        return None
+
+
 async def ai_pre_filter_usulan(user_input: str) -> Dict[str, str]:
     """
     AI Pre-Filter untuk usulan - reformulasi input user (async).
@@ -491,7 +613,7 @@ def _fallback_rerank(text_results: list, document_results: list, web_results: li
     }
 
 
-async def ai_extract_answer(question: str, raw_text: str, source_type: str, metadata: Dict[str, Any]) -> str:
+async def ai_extract_answer(question: str, raw_text: str, source_type: str, metadata: Dict[str, Any]) -> Optional[str]:
     """
     RAG Extraction: Summarize the exact answer from the chunk based on the question.
     Only called for document and web sources.
@@ -531,15 +653,14 @@ async def ai_extract_answer(question: str, raw_text: str, source_type: str, meta
         llm_response = await call_filter_llm(
             system_prompt=prompt,
             user_message=user_prompt,
-            temperature=0.1,
-            max_tokens=350
+            temperature=0.1
         )
 
         if not llm_response:
-            return raw_text # Fallback to raw text
+            return None
 
         return llm_response.strip()
 
     except Exception as e:
         logger.error(f"[AI-EXTRACT] Error: {e}")
-        return raw_text
+        return None

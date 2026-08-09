@@ -18,6 +18,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 from config import config
 from shared.logging_config import setup_logging
+from shared.security import InternalAuthMiddleware
 
 from services.rag_text import search as search_module
 from services.rag_text import sync as sync_module
@@ -145,6 +146,8 @@ app = FastAPI(
     version="3.0.0",
     lifespan=lifespan
 )
+
+app.add_middleware(InternalAuthMiddleware)
 
 
 # ============== ENDPOINTS ==============

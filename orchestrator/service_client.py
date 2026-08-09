@@ -5,6 +5,8 @@ from typing import Dict, Any, Tuple
 
 import httpx
 
+from config import config
+
 logger = logging.getLogger("orchestrator")
 
 # Global HTTP client (to be initialized by main app)
@@ -39,16 +41,17 @@ async def call_service(
     global http_client
     url = f"{service_url}{endpoint}"
     method = method.upper()
+    headers = {"X-API-Key": config.INTERNAL_API_KEY}
     
     try:
         if method == "POST":
-            response = await http_client.post(url, json=data, timeout=timeout)
+            response = await http_client.post(url, json=data, headers=headers, timeout=timeout)
         elif method == "PUT":
-            response = await http_client.put(url, json=data, timeout=timeout)
+            response = await http_client.put(url, json=data, headers=headers, timeout=timeout)
         elif method == "GET":
-            response = await http_client.get(url, timeout=timeout)
+            response = await http_client.get(url, headers=headers, timeout=timeout)
         elif method == "DELETE":
-            response = await http_client.request("DELETE", url, json=data, timeout=timeout)
+            response = await http_client.request("DELETE", url, json=data, headers=headers, timeout=timeout)
         else:
             raise ValueError(f"Unsupported method: {method}")
 

@@ -346,6 +346,7 @@ def _embed_with_shared_service(texts: List[str]) -> List[List[float]]:
             "prefix": "passage: ",
             "model_size": "large",
         },
+        headers={"X-API-Key": config.INTERNAL_API_KEY},
         timeout=max(120, config.OCR_TIMEOUT),
     )
     response.raise_for_status()

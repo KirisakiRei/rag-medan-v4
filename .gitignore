@@ -35,7 +35,6 @@ venv.bak/
 .env
 .env.local
 .env.*.local
-.env.example
 
 # IDEs
 .vscode/
@@ -98,3 +97,4 @@ rag-v2/
 web-scraping/
 test_file/
 tes_doc/
+docs/
