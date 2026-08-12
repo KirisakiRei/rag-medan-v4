@@ -178,6 +178,23 @@ class Config:
     EMBEDDING_THREAD_POOL_SIZE = _env("EMBEDDING_THREAD_POOL_SIZE", 2, int)
     LARGE_MODEL_IDLE_TIMEOUT = _env("LARGE_MODEL_IDLE_TIMEOUT", 1800, int)
 
+    # ============== LIGHTRAG ADAPTER (v4) ==============
+    RAG_SEARCH_ENGINE = _env("RAG_SEARCH_ENGINE", "legacy")  # legacy|lightrag|shadow
+    LIGHTRAG_ADAPTER_URL = _env("LIGHTRAG_ADAPTER_URL", "http://localhost:5015")
+    LIGHTRAG_ADAPTER_PORT = _env("LIGHTRAG_ADAPTER_PORT", 5015, int)
+    LIGHTRAG_BASE_URL = _env("LIGHTRAG_BASE_URL", "http://127.0.0.1:9621")
+    LIGHTRAG_API_KEY = _env("LIGHTRAG_API_KEY", "")
+    LIGHTRAG_WORKSPACE = _env("LIGHTRAG_WORKSPACE", "medan-main")
+    LIGHTRAG_QUERY_MODE = _env("LIGHTRAG_QUERY_MODE", "mix")  # naive|local|global|hybrid|mix
+    LIGHTRAG_TOP_K = _env("LIGHTRAG_TOP_K", 10, int)
+    LIGHTRAG_RERANK_ENABLED = _env("LIGHTRAG_RERANK_ENABLED", "false", bool)
+    LIGHTRAG_FALLBACK_TO_LEGACY = _env("LIGHTRAG_FALLBACK_TO_LEGACY", "true", bool)
+    LIGHTRAG_INDEX_TEXT = _env("LIGHTRAG_INDEX_TEXT", "true", bool)
+    LIGHTRAG_INDEX_DOCUMENT = _env("LIGHTRAG_INDEX_DOCUMENT", "true", bool)
+    LIGHTRAG_INDEX_WEB = _env("LIGHTRAG_INDEX_WEB", "true", bool)
+    LIGHTRAG_TIMEOUT_SEC = _env("LIGHTRAG_TIMEOUT_SEC", 120, int)
+    LIGHTRAG_MAX_RETRIES = _env("LIGHTRAG_MAX_RETRIES", 3, int)
+
 
 # Canonical configuration instance used across the codebase
 config = Config()

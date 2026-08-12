@@ -98,3 +98,6 @@ web-scraping/
 test_file/
 tes_doc/
 docs/
+
+# LightRAG (cloned external repo — setup separately on VPS)
+lightrag/

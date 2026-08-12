@@ -164,6 +164,29 @@ module.exports = {
       error_file: "./logs/embedding-service-error.log",
       out_file: "./logs/embedding-service-out.log",
       merge_logs: true
+    },
+
+    // ============== LIGHTRAG ADAPTER (v4) ==============
+    {
+      name: "lightrag-adapter",
+      script: pythonPath,
+      args: "-m uvicorn services.lightrag_adapter.main:app --host 0.0.0.0 --port 5015",
+      cwd: __dirname,
+      interpreter: "none",
+      env: {
+        PYTHONPATH: __dirname,
+        LIGHTRAG_ADAPTER_PORT: 5015,
+        PYTHONMALLOC: "malloc",
+        MALLOC_TRIM_THRESHOLD_: "100000"
+      },
+      instances: 1,
+      autorestart: true,
+      watch: false,
+      max_memory_restart: "1G",
+      log_date_format: "YYYY-MM-DD HH:mm:ss",
+      error_file: "./logs/lightrag-adapter-error.log",
+      out_file: "./logs/lightrag-adapter-out.log",
+      merge_logs: true
     }
   ]
 };
