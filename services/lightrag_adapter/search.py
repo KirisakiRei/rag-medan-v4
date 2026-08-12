@@ -82,50 +82,40 @@ async def search(
         )
         retrieval_sec = time.time() - retrieval_start
 
-        # Parse raw contexts dari LightRAG response.
-        # LightRAG bisa return context dalam berbagai format tergantung versi:
-        # - "contexts" list
-        # - "retrieved_contexts" list
-        # - "references" list (saat response_type=default / answer generation)
-        # - "response" string (single generated answer)
-        raw_contexts = (
-            lightrag_result.get("contexts")
-            or lightrag_result.get("retrieved_contexts")
-            or []
-        )
+        # ── Parse response LightRAG (format /query) ──
+        # LightRAG /query mengembalikan:
+        #   { "response": <str jawaban>, "references": [...], "response_time": ... }
+        # TIDAK mengembalikan "contexts"/"retrieved_contexts" — field itu
+        # selalu kosong dan tidak boleh dijadikan sumber data.
+        generated_answer = str(lightrag_result.get("response") or "").strip()
 
-        # Fallback 1: extract contexts dari references (berisi file_source
-        # yang kita set saat ingest: "web:<id>", "document:<id>", "text:<id>").
-        if not raw_contexts:
-            references = (
-                lightrag_result.get("references")
-                or lightrag_result.get("retrieved_contexts")
-                or []
+        references = lightrag_result.get("references") or []
+
+        # Build raw contexts dari references. Setiap reference mewakili satu
+        # file sumber; content-nya berupa LIST chunk teks (tersedia karena
+        # include_chunk_content=True). Setiap chunk jadi satu context item
+        # agar canonical mapping bisa parse file_source -> source_type/id.
+        raw_contexts = []
+        for ref in references:
+            doc_descriptor = (
+                ref.get("file_source")
+                or ref.get("file_path")
+                or ref.get("source")
+                or ref.get("document_id")
+                or ""
             )
-            for ref in references:
-                doc_descriptor = (
-                    ref.get("file_source")
-                    or ref.get("file_path")
-                    or ref.get("source")
-                    or ref.get("document_id")
-                    or ""
-                )
+            chunk_contents = ref.get("content") or []
+            if isinstance(chunk_contents, str):
+                chunk_contents = [chunk_contents]
+            for chunk_text in chunk_contents:
+                if not chunk_text or not str(chunk_text).strip():
+                    continue
                 raw_contexts.append({
-                    "content": ref.get("content") or ref.get("text") or "",
+                    "content": chunk_text,
                     "doc_id": doc_descriptor,
-                    "title": ref.get("source") or ref.get("title") or "",
+                    "title": ref.get("title") or doc_descriptor,
                     "score": ref.get("score"),
                 })
-
-        # Fallback 2: jika tetap tidak ada structured contexts,
-        # gunakan generated response sebagai single context.
-        if not raw_contexts and isinstance(lightrag_result.get("response"), str):
-            raw_contexts = [{
-                "content": lightrag_result["response"],
-                "doc_id": "",
-                "title": "",
-                "score": None,
-            }]
 
         # Map ke canonical format
         canonical_contexts = map_lightrag_context_to_canonical(raw_contexts)
@@ -141,6 +131,7 @@ async def search(
                 "query": query,
                 "contexts": [],
                 "references": [],
+                "answer": "",
                 "timing": {
                     "retrieval_sec": round(retrieval_sec, 3),
                     "rerank_sec": 0.0,
@@ -160,6 +151,7 @@ async def search(
             "query": query,
             "contexts": canonical_contexts,
             "references": references,
+            "answer": generated_answer,
             "timing": {
                 "retrieval_sec": round(retrieval_sec, 3),
                 "rerank_sec": 0.0,    # Diisi saat reranker diaktifkan
@@ -178,6 +170,7 @@ async def search(
             "error": str(e),
             "contexts": [],
             "references": [],
+            "answer": "",
             "timing": {"total_sec": round(total_sec, 3)},
         }
 
@@ -192,6 +185,7 @@ async def search(
             "error": str(e),
             "contexts": [],
             "references": [],
+            "answer": "",
             "timing": {"total_sec": round(total_sec, 3)},
         }
 
@@ -206,5 +200,6 @@ async def search(
             "error": str(e),
             "contexts": [],
             "references": [],
+            "answer": "",
             "timing": {"total_sec": round(total_sec, 3)},
         }

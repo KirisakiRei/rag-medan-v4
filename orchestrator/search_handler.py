@@ -65,7 +65,7 @@ async def _run_lightrag_search(
     user_question: str,
     wa_number: str,
     top_k: int = 3
-) -> tuple[List[Dict[str, Any]], float, int]:
+) -> tuple[List[Dict[str, Any]], float, int, str]:
     """
     Eksekusi pencarian utama via LightRAG Adapter (menggantikan legacy parallel search).
     Map hasil dari LightRAG format (contexts) ke Legacy format (candidates)
@@ -92,6 +92,7 @@ async def _run_lightrag_search(
 
     search_duration = time.time() - search_start
     contexts = result.get("contexts", [])
+    generated_answer = str(result.get("answer") or "").strip()
     
     all_candidates = []
     for ctx in contexts:
@@ -102,16 +103,29 @@ async def _run_lightrag_search(
                 f"[LIGHTRAG-SEARCH] source_type tidak dikenal, fallback "
                 f"infer -> {source_type}"
             )
-        # Default fallback score jika LightRAG tidak mengeluarkan skor spesifik
+        content = ctx.get("content", "") or ""
+        if not str(content).strip():
+            # Context tanpa teks tidak bisa dijadikan kandidat jawaban.
+            # Jangan pernah memaksakannya menjadi hasil — itu false positive.
+            logger.warning(
+                f"[LIGHTRAG-SEARCH] Skip context kosong "
+                f"(source={source_type}, id={ctx.get('source_id', '')})"
+            )
+            continue
+
+        # LightRAG /query tidak mengeluarkan score per context.
+        # JANGAN fallback ke nilai tinggi (mis. 0.85) — itu membuat hasil
+        # tidak relevan lolos sebagai "ditemukan". Tanpa score, urutan
+        # hasil murni dari urutan references yang dikembalikan LightRAG.
         score = ctx.get("score")
         if score is None:
-            score = 0.85
+            score = 0.0
             
         candidate = {
             "source": source_type,
             "final_score": float(score),
-            "content_for_check": ctx.get("content", ""),
-            "answer_doc": ctx.get("content", ""),
+            "content_for_check": content,
+            "answer_doc": content,
             "question": ctx.get("title", ""),
             "note": "lightrag_engine"
         }
@@ -140,7 +154,7 @@ async def _run_lightrag_search(
     all_candidates = all_candidates[:top_k]
     
     logger.info(f"[LIGHTRAG-SEARCH] Found {len(all_candidates)} mapped candidates in {search_duration:.2f}s")
-    return all_candidates, search_duration, 1
+    return all_candidates, search_duration, 1, generated_answer
 
 def _run_shadow_lightrag_comparison(
     normalized_question: str,
@@ -657,7 +671,7 @@ async def unified_search(
     if engine == "lightrag":
         # 2 & 3. MAIN LIGHTRAG SEARCH
         logger.info("[ENGINE] Menggunakan LightRAG sebagai mesin pencarian utama")
-        all_candidates, parallel_duration, services_queried = await _run_lightrag_search(
+        all_candidates, parallel_duration, services_queried, lightrag_answer = await _run_lightrag_search(
             normalized_question, user_question, wa_number, top_k=5
         )
     else:
@@ -717,19 +731,41 @@ async def unified_search(
 
     if engine == "lightrag":
         # 5. LIGHTRAG SHORT-CIRCUIT
-        # LightRAG sudah generate jawaban final + relevance check inheren di
-        # retrieval & generation-nya. Lewati AI relevance + extraction ganda.
-        selected_candidate = all_candidates[0] if all_candidates else None
-        ai_reason = "Jawaban di-generate oleh LightRAG engine"
-        candidates_checked = 1
+        # LightRAG sudah generate jawaban final (response) + retrieval
+        # inheren. Jawaban asli = generated_answer, bukan teks chunk.
+        #
+        # VALIDASI KETAT: hanya anggap "ketemu" jika:
+        #   a) Ada jawaban generate non-kosong dari LightRAG, DAN
+        #   b) Bukan placeholder "No relevant context found for the query."
+        # Kalau tidak — ini NOT FOUND, bukan SUCCESS. Jangan paksa.
+        _NO_CONTEXT_MARKER = "No relevant context found for the query"
+        answer_is_valid = bool(lightrag_answer) and lightrag_answer != _NO_CONTEXT_MARKER
+        selected_candidate = None
+        ai_reason = "Tidak ada jawaban relevan dari LightRAG"
+        candidates_checked = len(all_candidates) if all_candidates else 1
         relevance_duration = 0.0
-        if selected_candidate:
+
+        if answer_is_valid:
+            selected_candidate = all_candidates[0] if all_candidates else {
+                "source": "lightrag",
+                "final_score": 0.0,
+                "content_for_check": "",
+                "answer_doc": "",
+                "question": "",
+                "note": "lightrag_engine",
+            }
+            # Jawaban final LightRAG mengalahkan teks chunk mentah.
+            selected_candidate["answer_doc"] = lightrag_answer
+            ai_reason = "Jawaban di-generate oleh LightRAG engine"
             logger.info(
-                f"[ENGINE] LightRAG short-circuit: langsung ambil jawaban "
-                f"(score={selected_candidate.get('final_score', 0):.4f})"
+                f"[ENGINE] LightRAG short-circuit: jawaban valid "
+                f"(len={len(lightrag_answer)} chars)"
             )
         else:
-            logger.warning("[ENGINE] LightRAG short-circuit: no candidate")
+            logger.warning(
+                "[ENGINE] LightRAG answer kosong/placeholder — "
+                "diputuskan NOT FOUND (bukan SUCCESS)"
+            )
     else:
         # 5. AI RELEVANCE CHECK (LEGACY / SHADOW)
         selected_candidate, ai_reason, candidates_checked, relevance_duration = \

@@ -249,17 +249,23 @@ class LightRAGClient:
         mode: str = "mix",
         top_k: int = 10,
         include_references: bool = True,
+        include_chunk_content: bool = True,
     ) -> Dict[str, Any]:
         """
         Execute search query terhadap LightRAG Server.
 
         POST /query
+
+        include_chunk_content=True agar `references[].content` berisi teks
+        chunk asli (bukan hanya metadata file). Tanpa ini jawaban tidak
+        bisa diverifikasi / ditampilkan sumbernya.
         """
         payload = {
             "query": query_text,
             "mode": mode,
             "top_k": top_k,
             "include_references": include_references,
+            "include_chunk_content": include_chunk_content,
             "enable_rerank": adapter_config.RERANK_ENABLED,
         }
         return await self._request("POST", "/query", json_data=payload)
