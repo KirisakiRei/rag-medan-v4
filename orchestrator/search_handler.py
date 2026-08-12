@@ -2,6 +2,7 @@
 
 import asyncio
 import time
+import re
 from typing import Dict, List, Any, Tuple
 import logging
 import sys
@@ -26,6 +27,38 @@ logger = logging.getLogger(__name__)
 
 
 # ============== LIGHTRAG MAIN MODE ==============
+
+def _infer_source_type(ctx: Dict[str, Any]) -> str:
+    """Fallback: infer source_type saat LightRAG tidak mengirim metadata."""
+    source_id = str(ctx.get("source_id") or "")
+    source_uri = str(ctx.get("source_uri") or "")
+    title = str(ctx.get("title") or "")
+    content = str(ctx.get("content") or "")[:2000]
+
+    # 1. source_id berformat "web:<id>" / "document:<id>" / "text:<id>"
+    for prefix, stype in (("web:", "web"), ("document:", "document"), ("text:", "text")):
+        if source_id.startswith(prefix):
+            return stype
+
+    # 2. source_uri mengandung scheme
+    if "sql://rag_text" in source_uri:
+        return "text"
+    if "document://" in source_uri:
+        return "document"
+    if source_uri.startswith("http") or "web://" in source_uri:
+        return "web"
+
+    # 3. title/content mengandung URL -> web
+    if re.search(r"https?://", title) or re.search(r"https?://", content):
+        return "web"
+
+    # 4. title/content mengandung ekstensi file dokumen -> document
+    if re.search(r"\.(pdf|docx?|xlsx?|pptx?|txt|jpg|png)$", title, re.I):
+        return "document"
+
+    # 5. Default: text
+    return "text"
+
 
 async def _run_lightrag_search(
     normalized_question: str,
@@ -62,7 +95,13 @@ async def _run_lightrag_search(
     
     all_candidates = []
     for ctx in contexts:
-        source_type = ctx.get("source_type", "unknown")
+        source_type = ctx.get("source_type", "") or "unknown"
+        if source_type == "unknown" or source_type not in ("text", "document", "web"):
+            source_type = _infer_source_type(ctx)
+            logger.info(
+                f"[LIGHTRAG-SEARCH] source_type tidak dikenal, fallback "
+                f"infer -> {source_type}"
+            )
         # Default fallback score jika LightRAG tidak mengeluarkan skor spesifik
         score = ctx.get("score")
         if score is None:

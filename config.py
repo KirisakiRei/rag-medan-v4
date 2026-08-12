@@ -64,6 +64,7 @@ class Config:
     COLLECTION_WEB = _env("COLLECTION_WEB", "web_scraping_bank")
     COLLECTION_WEB_STATE = _env("COLLECTION_WEB_STATE", "web_scraping_state")
     COLLECTION_USULAN = _env("COLLECTION_USULAN", "usulan_bank")
+    COLLECTION_DOCUMENT_DEDUP_REGISTRY = _env("COLLECTION_DOCUMENT_DEDUP_REGISTRY", "document_dedup_registry")
     
     # LLM Configuration
     LLM_BASE_URL = _env("LLM_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/models")

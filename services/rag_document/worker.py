@@ -17,7 +17,7 @@ import requests
 import urllib3
 from qdrant_client import QdrantClient
 from qdrant_client.http import models as qdrant_models
-from qdrant_client.http.models import Distance, VectorParams
+from qdrant_client.http.models import Distance, PointStruct, VectorParams
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -43,6 +43,7 @@ for handler in logger.handlers:
 
 _PROJECT_ROOT = Path(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 _PROGRESS_PREFIX = "__PROGRESS__"
+_DUMMY_VECTOR = [0.0]
 
 
 def emit_progress(stage: str, message: str, **extra) -> None:
@@ -182,105 +183,54 @@ def _resolve_file(
         raise IOError(f"Gagal mengunduh file: {url} - {e}")
 
 
-def check_duplicate_by_file_hash(
+def check_dedup(qdrant: QdrantClient, hash_kind: str, hash_value: str) -> Optional[dict]:
+    """
+    Cek registry dedup (collection document_dedup) via retrieve-by-id.
+
+    Registry menyimpan 2 point per dokumen: "f:{file_hash}" dan "c:{content_hash}".
+    Jika point ada, file/konten yang sama pernah diproses → skip OCR.
+    """
+    try:
+        points = qdrant.retrieve(
+            collection_name=config.COLLECTION_DOCUMENT_DEDUP_REGISTRY,
+            ids=[f"{hash_kind}:{hash_value}"],
+            with_payload=True,
+            with_vectors=False,
+        )
+        return dict(points[0].payload) if points else None
+    except Exception as e:
+        logger.warning(f"[DEDUP] Gagal cek {hash_kind}: {e}")
+        return None
+
+
+def register_dedup(
     qdrant: QdrantClient,
-    collection_name: str,
     file_hash: str,
-) -> dict:
-    try:
-        results, _ = qdrant.scroll(
-            collection_name=collection_name,
-            scroll_filter=qdrant_models.Filter(
-                must=[
-                    qdrant_models.FieldCondition(
-                        key="file_hash",
-                        match=qdrant_models.MatchValue(value=file_hash),
-                    )
-                ]
-            ),
-            limit=1,
-            with_payload=True,
-        )
-        if results:
-            is_deleted = results[0].payload.get("is_deleted", False)
-            return {"exists": True, "point": results[0], "is_deleted": is_deleted}
-    except Exception as e:
-        logger.warning(f"[DEDUP] Gagal cek file_hash: {e}")
-    return {"exists": False, "point": None, "is_deleted": False}
-
-
-def check_duplicate_by_content_hash(
-    qdrant: QdrantClient,
-    collection_name: str,
     content_hash: str,
-) -> dict:
-    try:
-        results, _ = qdrant.scroll(
-            collection_name=collection_name,
-            scroll_filter=qdrant_models.Filter(
-                must=[
-                    qdrant_models.FieldCondition(
-                        key="content_hash",
-                        match=qdrant_models.MatchValue(value=content_hash),
-                    )
-                ]
-            ),
-            limit=1,
-            with_payload=True,
-        )
-        if results:
-            is_deleted = results[0].payload.get("is_deleted", False)
-            return {"exists": True, "point": results[0], "is_deleted": is_deleted}
-    except Exception as e:
-        logger.warning(f"[DEDUP] Gagal cek content_hash: {e}")
-    return {"exists": False, "point": None, "is_deleted": False}
-
-
-def reactivate_document(
-    qdrant: QdrantClient,
-    collection_name: str,
     doc_id: str,
-    *,
-    is_active: bool = True,
-) -> int:
-    all_point_ids = []
-    offset = None
+) -> None:
+    """Tulis registry dedup setelah dokumen berhasil di-index ke LightRAG."""
+    if not file_hash and not content_hash:
+        return
     now = datetime.utcnow().isoformat()
-
-    while True:
-        results, next_offset = qdrant.scroll(
-            collection_name=collection_name,
-            scroll_filter=qdrant_models.Filter(
-                must=[
-                    qdrant_models.FieldCondition(
-                        key="mysql_id",
-                        match=qdrant_models.MatchValue(value=doc_id),
-                    )
-                ]
-            ),
-            limit=100,
-            offset=offset,
-            with_payload=False,
-        )
-        all_point_ids.extend([p.id for p in results])
-        if next_offset is None:
-            break
-        offset = next_offset
-
-    if all_point_ids:
-        qdrant.set_payload(
-            collection_name=collection_name,
-            payload={
-                "is_active": is_active,
-                "is_deleted": False,
-                "deleted_at": None,
-                "reactivated_at": now,
-            },
-            points=all_point_ids,
-        )
-        logger.info(f"[REACTIVATE] {len(all_point_ids)} chunk dipulihkan untuk doc_id={doc_id}")
-
-    return len(all_point_ids)
+    points = []
+    if file_hash:
+        points.append(PointStruct(
+            id=f"f:{file_hash}",
+            vector=_DUMMY_VECTOR,
+            payload={"file_hash": file_hash, "doc_id": doc_id, "registered_at": now},
+        ))
+    if content_hash:
+        points.append(PointStruct(
+            id=f"c:{content_hash}",
+            vector=_DUMMY_VECTOR,
+            payload={"content_hash": content_hash, "doc_id": doc_id, "registered_at": now},
+        ))
+    try:
+        qdrant.upsert(collection_name=config.COLLECTION_DOCUMENT_DEDUP_REGISTRY, points=points)
+        logger.info(f"[DEDUP] Registered {len(points)} hash(es) untuk doc_id={doc_id}")
+    except Exception as e:
+        logger.warning(f"[DEDUP] Gagal register doc_id={doc_id}: {e}")
 
 
 def _build_chunk_items(
@@ -327,13 +277,6 @@ def _extract_structured_blocks_for_worker(
         lang=lang,
         progress_callback=progress_callback,
     )
-
-
-def _get_existing_doc_id(point: Optional[object]) -> Optional[str]:
-    payload = getattr(point, "payload", None) or {}
-    if isinstance(payload, dict):
-        return payload.get("mysql_id")
-    return None
 
 
 def process_document(
@@ -394,17 +337,12 @@ def process_document(
 
         progress_callback("dedup", "Menghubungkan ke Qdrant dan memeriksa duplikasi awal...")
         qdrant = _connect_qdrant()
-        _ensure_collection(qdrant, collection_name)
+        _ensure_collection(qdrant)
 
         if not skip_dedup_check and file_hash:
-            dedup_result = check_duplicate_by_file_hash(qdrant, collection_name, file_hash)
-            if dedup_result["exists"]:
-                existing_doc_id = _get_existing_doc_id(dedup_result.get("point")) or doc_id
-                if dedup_result["is_deleted"]:
-                    logger.info(f"[WORKER] file_hash match (soft-deleted) - reactivating doc_id={existing_doc_id}")
-                    n = reactivate_document(qdrant, collection_name, existing_doc_id, is_active=is_active)
-                    return {"status": "reactivated", "total_chunks": n, "message": ""}
-                logger.info("[WORKER] file_hash match (aktif) - duplicate, skip OCR")
+            dedup_point = check_dedup(qdrant, "f", file_hash)
+            if dedup_point:
+                logger.info("[WORKER] file_hash match - duplicate, skip OCR")
                 return {"status": "duplicate", "total_chunks": 0, "message": ""}
 
         progress_callback("extracting", "Mengekstrak teks dokumen...")
@@ -426,14 +364,9 @@ def process_document(
 
         if not skip_dedup_check:
             progress_callback("dedup", "Memeriksa duplikasi berdasarkan konten hasil ekstraksi...")
-            content_dedup = check_duplicate_by_content_hash(qdrant, collection_name, content_hash)
-            if content_dedup["exists"]:
-                existing_doc_id = _get_existing_doc_id(content_dedup.get("point")) or doc_id
-                if content_dedup["is_deleted"]:
-                    logger.info(f"[WORKER] content_hash match (soft-deleted) - reactivating doc_id={existing_doc_id}")
-                    n = reactivate_document(qdrant, collection_name, existing_doc_id, is_active=is_active)
-                    return {"status": "reactivated", "total_chunks": n, "message": ""}
-                logger.info("[WORKER] content_hash match (aktif) - duplicate")
+            content_dedup = check_dedup(qdrant, "c", content_hash)
+            if content_dedup:
+                logger.info("[WORKER] content_hash match - duplicate")
                 return {"status": "duplicate", "total_chunks": 0, "message": ""}
 
         progress_callback("chunking", "Mengekstrak block terstruktur dokumen...")
@@ -486,6 +419,7 @@ def process_document(
             is_active=is_active,
             organization_id=organization_id,
         )
+        register_dedup(qdrant, file_hash, content_hash, doc_id)
 
         return {"status": "ok", "total_chunks": total_chunks, "message": ""}
 
@@ -511,42 +445,18 @@ def _connect_qdrant() -> QdrantClient:
     return QdrantClient(url=f"http://{config.QDRANT_HOST}:{config.QDRANT_PORT}")
 
 
-def _ensure_collection(qdrant: QdrantClient, collection_name: str):
+def _ensure_collection(qdrant: QdrantClient):
+    collection_name = config.COLLECTION_DOCUMENT_DEDUP_REGISTRY
     collections = qdrant.get_collections()
     existing = [c.name for c in collections.collections]
     if collection_name not in existing:
-        logger.info(f"[WORKER] Membuat collection: {collection_name}")
+        logger.info(f"[WORKER] Membuat collection dedup: {collection_name}")
         qdrant.create_collection(
             collection_name=collection_name,
             vectors_config=VectorParams(
-                size=config.EMBEDDING_DIMENSION_LARGE,
+                size=1,
                 distance=Distance.COSINE,
             ),
-        )
-        qdrant.create_payload_index(
-            collection_name=collection_name,
-            field_name="mysql_id",
-            field_schema=qdrant_models.PayloadSchemaType.KEYWORD,
-        )
-        qdrant.create_payload_index(
-            collection_name=collection_name,
-            field_name="is_deleted",
-            field_schema=qdrant_models.PayloadSchemaType.BOOL,
-        )
-        qdrant.create_payload_index(
-            collection_name=collection_name,
-            field_name="is_active",
-            field_schema=qdrant_models.PayloadSchemaType.BOOL,
-        )
-        qdrant.create_payload_index(
-            collection_name=collection_name,
-            field_name="chunk_level",
-            field_schema=qdrant_models.PayloadSchemaType.KEYWORD,
-        )
-        qdrant.create_payload_index(
-            collection_name=collection_name,
-            field_name="parent_chunk_id",
-            field_schema=qdrant_models.PayloadSchemaType.KEYWORD,
         )
 
 
