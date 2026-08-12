@@ -193,6 +193,7 @@ class OpenAIEmbedResponse(BaseModel):
 
 
 @app.post("/v1/embeddings", response_model=OpenAIEmbedResponse)
+@app.post("/embeddings", response_model=OpenAIEmbedResponse)
 async def openai_embed(request: OpenAIEmbedRequest):
     """
     OpenAI-compatible embedding endpoint.
