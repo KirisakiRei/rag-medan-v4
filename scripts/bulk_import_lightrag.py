@@ -277,7 +277,7 @@ class LightRAGInserter:
         try:
             response = await self.client.post(
                 f"{self.base_url}/documents/text",
-                json={"text": text, "description": description},
+                json={"text": text, "file_source": description},
             )
             response.raise_for_status()
             self.total_success += 1
