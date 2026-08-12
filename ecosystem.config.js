@@ -166,6 +166,27 @@ module.exports = {
       merge_logs: true
     },
 
+    // ============== LIGHTRAG SERVER (v4) ==============
+    {
+      name: "lightrag-server",
+      script: path.join(__dirname, '.venv', isWindows ? 'Scripts' : 'bin', isWindows ? 'lightrag-server.exe' : 'lightrag-server'),
+      args: "",
+      cwd: path.join(__dirname, 'lightrag'),
+      interpreter: "none",
+      env: {
+        PYTHONMALLOC: "malloc",
+        MALLOC_TRIM_THRESHOLD_: "100000"
+      },
+      instances: 1,
+      autorestart: true,
+      watch: false,
+      max_memory_restart: "4G",
+      log_date_format: "YYYY-MM-DD HH:mm:ss",
+      error_file: "./logs/lightrag-server-error.log",
+      out_file: "./logs/lightrag-server-out.log",
+      merge_logs: true
+    },
+
     // ============== LIGHTRAG ADAPTER (v4) ==============
     {
       name: "lightrag-adapter",
