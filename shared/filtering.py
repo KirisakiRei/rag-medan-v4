@@ -7,8 +7,12 @@ import json
 import re
 import time
 import logging
+import warnings
 import httpx
 from typing import Dict, Any, List, Optional, Tuple
+
+# Suppress SSL InsecureRequestWarning (Router API uses self-signed cert)
+warnings.filterwarnings("ignore", message="Unverified HTTPS request")
 
 from config import config
 from shared.db import get_variable
@@ -35,7 +39,8 @@ def _get_gemini_client() -> httpx.AsyncClient:
     if _gemini_client is None or _gemini_client.is_closed:
         _gemini_client = httpx.AsyncClient(
             limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
-            timeout=httpx.Timeout(config.LLM_TIMEOUT, connect=30.0)
+            timeout=httpx.Timeout(config.LLM_TIMEOUT, connect=30.0),
+            verify=False  # Disable SSL verify for internal Router API
         )
     return _gemini_client
 
@@ -180,6 +185,7 @@ async def call_filter_llm(
                 "Authorization": f"Bearer {api_key}"
             }
             
+            print(f"[ROUTER-DEBUG] Calling {url} model={model_name}", flush=True)
             response = await client.post(url, headers=headers, json=payload)
             if response.status_code != 200:
                 logger.error(f"[ROUTER] HTTP {response.status_code}: {response.text}")
@@ -197,6 +203,7 @@ async def call_filter_llm(
             return content.strip()
             
         except Exception as e:
+            print(f"[ROUTER-DEBUG] EXCEPTION: {type(e).__name__}: {e}", flush=True)
             logger.error(f"[ROUTER] Error calling API: {type(e).__name__}: {e}", exc_info=True)
             logger.warning("[ROUTER] Falling back to Gemini...")
             return await _call_gemini_llm(system_prompt, user_message, temperature, max_tokens)
