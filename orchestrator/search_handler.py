@@ -54,7 +54,7 @@ def _run_shadow_lightrag_comparison(
             # ── Legacy metrics ──
             legacy_candidate_count = len(legacy_candidates)
             legacy_top_score = (
-                f"{legacy_candidates[0].get('final_score', 0):.4f}"
+                f"{float(legacy_candidates[0].get('final_score') or 0):.4f}"
                 if legacy_candidates
                 else "-"
             )
@@ -64,7 +64,7 @@ def _run_shadow_lightrag_comparison(
             lightrag_result_count = len(lightrag_contexts)
             lightrag_status = lightrag_result.get("status", "unknown")
             lightrag_top_score = (
-                f"{lightrag_contexts[0].get('score', 0):.4f}"
+                f"{float(lightrag_contexts[0].get('score') or 0):.4f}"
                 if lightrag_contexts
                 else "-"
             )
