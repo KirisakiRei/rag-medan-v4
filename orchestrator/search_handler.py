@@ -19,10 +19,70 @@ from shared.filtering import (
 )
 from shared.utils import normalize_text, clean_location_terms, detect_category
 from orchestrator.answer_validation import validate_extracted_answer
-from orchestrator.service_client import call_service_safe
+from orchestrator.service_client import call_service, call_service_safe
 from orchestrator.aggregation import aggregate_and_sort_candidates
 
 logger = logging.getLogger(__name__)
+
+
+# ============== SHADOW MODE (LightRAG Evaluation) ==============
+
+def _run_shadow_lightrag_comparison(
+    normalized_question: str,
+    legacy_candidates: List[Dict[str, Any]],
+) -> asyncio.Task:
+    """
+    Jalankan query LightRAG di background untuk evaluasi (shadow mode).
+
+    Hasil perbandingan Legacy vs LightRAG di-log tanpa mempengaruhi
+    response ke user. Legacy tetap menjadi sumber jawaban utama.
+    """
+    async def _shadow_comparison_task():
+        try:
+            lightrag_result = await call_service(
+                config.LIGHTRAG_ADAPTER_URL,
+                "/internal/search",
+                "POST",
+                {
+                    "query": normalized_question,
+                    "mode": config.LIGHTRAG_QUERY_MODE,
+                    "top_k": config.LIGHTRAG_TOP_K,
+                },
+                timeout=float(config.LIGHTRAG_TIMEOUT_SEC),
+            )
+
+            # ── Legacy metrics ──
+            legacy_candidate_count = len(legacy_candidates)
+            legacy_top_score = (
+                f"{legacy_candidates[0].get('final_score', 0):.4f}"
+                if legacy_candidates
+                else "-"
+            )
+
+            # ── LightRAG metrics ──
+            lightrag_contexts = lightrag_result.get("contexts", [])
+            lightrag_result_count = len(lightrag_contexts)
+            lightrag_status = lightrag_result.get("status", "unknown")
+            lightrag_top_score = (
+                f"{lightrag_contexts[0].get('score', 0):.4f}"
+                if lightrag_contexts
+                else "-"
+            )
+
+            logger.info(
+                f"[SHADOW] query='{normalized_question[:60]}' | "
+                f"legacy={legacy_candidate_count} (top_score={legacy_top_score}) | "
+                f"lightrag={lightrag_result_count} (top_score={lightrag_top_score}) | "
+                f"status={lightrag_status}"
+            )
+
+        except Exception as exc:
+            logger.warning(
+                f"[SHADOW] LightRAG comparison failed: "
+                f"{type(exc).__name__}: {exc}"
+            )
+
+    return asyncio.create_task(_shadow_comparison_task())
 
 
 async def parallel_search_services(
@@ -488,6 +548,14 @@ async def unified_search(
         service_results,
         clean_question
     )
+
+    # 3.5 SHADOW MODE — query LightRAG di background untuk evaluasi
+    shadow_lightrag_task = None
+    if config.RAG_SEARCH_ENGINE == "shadow":
+        shadow_lightrag_task = _run_shadow_lightrag_comparison(
+            normalized_question,
+            all_candidates,
+        )
     
     # 4. EMPTY CHECK
     total_duration = time.time() - start_time
