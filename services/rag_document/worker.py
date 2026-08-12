@@ -647,7 +647,7 @@ def process_document(
             points.append(PointStruct(id=chunk_item.chunk_id, vector=vector, payload=payload))
 
             if len(points) >= _UPSERT_BATCH_SIZE:
-                qdrant.upsert(collection_name=collection_name, points=points)
+                # Removed qdrant.upsert
                 points = []
                 progress_callback(
                     "upserting",
@@ -657,10 +657,10 @@ def process_document(
                 )
 
         if points_by_id:
-            qdrant.upsert(collection_name=collection_name, points=list(points_by_id.values()))
+            pass # Removed qdrant upsert
 
         if points:
-            qdrant.upsert(collection_name=collection_name, points=points)
+            pass # Removed qdrant upsert
             progress_callback(
                 "upserting",
                 f"Upsert selesai {total_chunks}/{total_chunks} chunk.",

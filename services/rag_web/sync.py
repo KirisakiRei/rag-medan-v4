@@ -310,9 +310,8 @@ async def store_chunks(
         )
         point_ids.append(chunk.chunk_id)
 
-    await qdrant.upsert(collection_name=config.COLLECTION_WEB, points=points)
     logger.info(
-        f"[SYNC] Stored {len(parent_chunks)} parent + {len(child_chunks)} child points "
+        f"[SYNC] Stored (LightRAG only) {len(parent_chunks)} parent + {len(child_chunks)} child points "
         f"for web_bank_id={web_bank_id}"
     )
 
@@ -419,49 +418,22 @@ async def update_chunk_metadata(
 
 async def soft_delete_by_web_bank_id(web_bank_id: str) -> int:
     """Soft delete chunks by web_bank_id."""
-    chunks = await get_chunks_by_web_bank_id(web_bank_id)
-    if not chunks:
-        return 0
-
-    point_ids = [chunk["id"] for chunk in chunks]
-    now = _utcnow_iso()
-    await qdrant.set_payload(
-        collection_name=config.COLLECTION_WEB,
-        payload={"is_deleted": True, "is_active": False, "deleted_at": now, "updated_at": now},
-        points=point_ids,
-    )
-    logger.info(f"[SYNC] Soft deleted {len(point_ids)} chunks for web_bank_id={web_bank_id}")
+    logger.info(f"[SYNC] Soft deleted (LightRAG only) chunks for web_bank_id={web_bank_id}")
 
     # Fire-and-forget: hapus dari LightRAG
     fire_lightrag_delete(source_type="web", source_id=web_bank_id)
 
-    return len(point_ids)
+    return 1
 
 
 async def hard_delete_by_web_bank_id(web_bank_id: str) -> int:
     """Hard delete chunks by web_bank_id."""
-    results = await qdrant.scroll(
-        collection_name=config.COLLECTION_WEB,
-        scroll_filter=_chunk_filter(web_bank_id, include_deleted=True),
-        limit=1000,
-        with_payload=False,
-        with_vectors=False,
-    )
-    points = results[0]
-    if not points:
-        return 0
-
-    point_ids = [point.id for point in points]
-    await qdrant.delete(
-        collection_name=config.COLLECTION_WEB,
-        points_selector=qdrant_models.PointIdsList(points=point_ids),
-    )
-    logger.info(f"[SYNC] Hard deleted {len(point_ids)} chunks for web_bank_id={web_bank_id}")
+    logger.info(f"[SYNC] Hard deleted (LightRAG only) chunks for web_bank_id={web_bank_id}")
 
     # Fire-and-forget: hapus dari LightRAG
     fire_lightrag_delete(source_type="web", source_id=web_bank_id)
 
-    return len(point_ids)
+    return 1
 
 
 async def _send_callback_once(

@@ -52,20 +52,6 @@ async def sync_data(action: str, content: Any) -> Dict[str, Any]:
                     }
                 })
             
-            await qdrant.upsert(collection_name=config.COLLECTION_TEXT, points=points)
-            
-            await qdrant.create_payload_index(
-                collection_name=config.COLLECTION_TEXT,
-                field_name="question_rag_name",
-                field_schema=qdrant_models.TextIndexParams(
-                    type="text",
-                    tokenizer=qdrant_models.TokenizerType.WORD,
-                    min_token_len=2,
-                    max_token_len=15,
-                    lowercase=True
-                )
-            )
-            
             logger.info(f"[SYNC-DATA] Sinkronisasi {len(points)} data ke Knowledge Bank berhasil")
 
             # Fire-and-forget: sync ke LightRAG
@@ -89,21 +75,6 @@ async def sync_data(action: str, content: Any) -> Dict[str, Any]:
         
         elif action == "add":
             point_id = str(content["question_rag_id"])
-            [vector] = await encode_texts([content["question_rag_name"]], model=model, prefix="passage: ")
-            await qdrant.upsert(
-                collection_name=config.COLLECTION_TEXT,
-                points=[{
-                    "id": point_id,
-                    "vector": vector,
-                    "payload": {
-                        "question_id": content["question_id"],
-                        "answer_id": content["answer_id"],
-                        "category_id": content.get("category_id"),
-                        "question": content["question"],
-                        "question_rag_name": content["question_rag_name"]
-                    }
-                }]
-            )
             logger.info(f"[SYNC-DATA] Data berhasil ditambahkan ke Knowledge Bank: ID={point_id}")
 
             # Fire-and-forget: sync ke LightRAG
@@ -122,21 +93,6 @@ async def sync_data(action: str, content: Any) -> Dict[str, Any]:
         
         elif action == "update":
             point_id = str(content["question_rag_id"])
-            [vector] = await encode_texts([content["question_rag_name"]], model=model, prefix="passage: ")
-            await qdrant.upsert(
-                collection_name=config.COLLECTION_TEXT,
-                points=[{
-                    "id": point_id,
-                    "vector": vector,
-                    "payload": {
-                        "question_id": content["question_id"],
-                        "answer_id": content["answer_id"],
-                        "category_id": content.get("category_id"),
-                        "question": content["question"],
-                        "question_rag_name": content["question_rag_name"]
-                    }
-                }]
-            )
             logger.info(f"[SYNC-DATA] Data berhasil Diperbarui di Knowledge Bank: ID={point_id}")
 
             # Fire-and-forget: sync ke LightRAG
@@ -155,11 +111,6 @@ async def sync_data(action: str, content: Any) -> Dict[str, Any]:
         
         elif action == "delete":
             point_id = str(content["question_rag_id"])
-            await qdrant.delete(
-                collection_name=config.COLLECTION_TEXT,
-                points_selector=qdrant_models.PointIdsList(points=[point_id]),
-                wait=True
-            )
             logger.info(f"[SYNC-DATA] Data dihapus : ID={point_id}")
 
             # Fire-and-forget: hapus dari LightRAG

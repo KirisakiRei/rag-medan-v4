@@ -55,24 +55,15 @@ async def soft_delete_document(doc_id: str) -> Dict[str, Any]:
             offset = next_offset
 
         if not all_point_ids:
-            return {"status": "not_found", "deleted": 0}
+            # We don't return not_found here because maybe it exists in LightRAG
+            pass
 
-        await qdrant.set_payload(
-            collection_name=config.COLLECTION_DOCUMENT,
-            payload={
-                "is_active": False,
-                "is_deleted": True,
-                "deleted_at": datetime.utcnow().isoformat()
-            },
-            points=all_point_ids
-        )
-
-        logger.info(f"[SOFT-DELETE] Soft deleted {len(all_point_ids)} chunks untuk doc_id={doc_id}")
+        logger.info(f"[SOFT-DELETE] Soft deleted (LightRAG only) untuk doc_id={doc_id}")
 
         # Fire-and-forget: hapus dari LightRAG
         fire_lightrag_delete(source_type="document", source_id=doc_id)
 
-        return {"status": "deleted", "deleted": len(all_point_ids)}
+        return {"status": "deleted", "deleted": 1}
 
     except Exception as e:
         logger.exception(f"[SOFT-DELETE] Error: {e}")
@@ -112,19 +103,14 @@ async def hard_delete_document(doc_id: str) -> Dict[str, Any]:
             offset = next_offset
 
         if not all_point_ids:
-            return {"status": "not_found", "deleted": 0}
+            pass
 
-        await qdrant.delete(
-            collection_name=config.COLLECTION_DOCUMENT,
-            points_selector=qdrant_models.PointIdsList(points=all_point_ids)
-        )
-
-        logger.info(f"[HARD-DELETE] Deleted {len(all_point_ids)} chunks untuk doc_id={doc_id}")
+        logger.info(f"[HARD-DELETE] Deleted (LightRAG only) untuk doc_id={doc_id}")
 
         # Fire-and-forget: hapus dari LightRAG
         fire_lightrag_delete(source_type="document", source_id=doc_id)
 
-        return {"status": "deleted", "deleted": len(all_point_ids)}
+        return {"status": "deleted", "deleted": 1}
 
     except Exception as e:
         logger.exception(f"[HARD-DELETE] Error: {e}")
