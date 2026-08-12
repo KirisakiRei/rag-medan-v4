@@ -25,7 +25,83 @@ from orchestrator.aggregation import aggregate_and_sort_candidates
 logger = logging.getLogger(__name__)
 
 
-# ============== SHADOW MODE (LightRAG Evaluation) ==============
+# ============== LIGHTRAG MAIN MODE ==============
+
+async def _run_lightrag_search(
+    normalized_question: str,
+    user_question: str,
+    wa_number: str,
+    top_k: int = 3
+) -> tuple[List[Dict[str, Any]], float, int]:
+    """
+    Eksekusi pencarian utama via LightRAG Adapter (menggantikan legacy parallel search).
+    Map hasil dari LightRAG format (contexts) ke Legacy format (candidates)
+    agar sisa pipeline (AI Relevance, AI Extraction, format Response) tetap berjalan normal.
+    """
+    logger.info(f"[LIGHTRAG-SEARCH] Querying LightRAG Adapter: {normalized_question[:60]}...")
+    search_start = time.time()
+    
+    try:
+        result = await call_service(
+            config.LIGHTRAG_ADAPTER_URL,
+            "/internal/search",
+            "POST",
+            {
+                "query": normalized_question,
+                "mode": config.LIGHTRAG_QUERY_MODE,
+                "top_k": config.LIGHTRAG_TOP_K,
+            },
+            timeout=float(config.LIGHTRAG_TIMEOUT_SEC),
+        )
+    except Exception as e:
+        logger.error(f"[LIGHTRAG-SEARCH] Adapter error: {e}")
+        return [], time.time() - search_start, 1
+
+    search_duration = time.time() - search_start
+    contexts = result.get("contexts", [])
+    
+    all_candidates = []
+    for ctx in contexts:
+        source_type = ctx.get("source_type", "unknown")
+        # Default fallback score jika LightRAG tidak mengeluarkan skor spesifik
+        score = ctx.get("score")
+        if score is None:
+            score = 0.85
+            
+        candidate = {
+            "source": source_type,
+            "final_score": float(score),
+            "content_for_check": ctx.get("content", ""),
+            "answer_doc": ctx.get("content", ""),
+            "question": ctx.get("title", ""),
+            "note": "lightrag_engine"
+        }
+        
+        # Mapping spesifik metadata untuk legacy response compatibility
+        if source_type == "text":
+            candidate["answer_id"] = ctx.get("source_id")
+        elif source_type == "web":
+            candidate["web_info"] = {
+                "web_bank_id": ctx.get("source_id"),
+                "url": ctx.get("source_uri", ""),
+                "title": ctx.get("title", ""),
+            }
+        elif source_type == "document":
+            candidate["document_info"] = {
+                "doc_id": ctx.get("source_id"),
+                "filename": ctx.get("title", ""),
+            }
+            
+        all_candidates.append(candidate)
+        
+    # Sort berdasarkan skor
+    all_candidates.sort(key=lambda x: x.get("final_score", 0.0), reverse=True)
+    
+    # Ambil Top K
+    all_candidates = all_candidates[:top_k]
+    
+    logger.info(f"[LIGHTRAG-SEARCH] Found {len(all_candidates)} mapped candidates in {search_duration:.2f}s")
+    return all_candidates, search_duration, 1
 
 def _run_shadow_lightrag_comparison(
     normalized_question: str,
@@ -536,26 +612,36 @@ async def unified_search(
     category_name = detected_category.get("name", "Global") if detected_category else "Global"
     logger.info(f"[NORMALIZE] normalized='{normalized_question[:60]}' | category={category_name}")
 
-    # 2. PARALLEL SEARCH
-    service_results, parallel_duration, services_queried = await parallel_search_services(
-        normalized_question,
-        user_question,
-        wa_number
-    )
-    
-    # 3. AGGREGATE + BOOST + SORT
-    all_candidates = aggregate_and_sort_candidates(
-        service_results,
-        clean_question
-    )
-
-    # 3.5 SHADOW MODE — query LightRAG di background untuk evaluasi
+    engine = config.RAG_SEARCH_ENGINE.lower()
     shadow_lightrag_task = None
-    if config.RAG_SEARCH_ENGINE == "shadow":
-        shadow_lightrag_task = _run_shadow_lightrag_comparison(
-            normalized_question,
-            all_candidates,
+
+    if engine == "lightrag":
+        # 2 & 3. MAIN LIGHTRAG SEARCH
+        logger.info("[ENGINE] Menggunakan LightRAG sebagai mesin pencarian utama")
+        all_candidates, parallel_duration, services_queried = await _run_lightrag_search(
+            normalized_question, user_question, wa_number, top_k=5
         )
+    else:
+        # 2. PARALLEL SEARCH (LEGACY / SHADOW)
+        logger.info(f"[ENGINE] Menggunakan Legacy parallel search (Mode: {engine})")
+        service_results, parallel_duration, services_queried = await parallel_search_services(
+            normalized_question,
+            user_question,
+            wa_number
+        )
+        
+        # 3. AGGREGATE + BOOST + SORT
+        all_candidates = aggregate_and_sort_candidates(
+            service_results,
+            clean_question
+        )
+
+        # 3.5 SHADOW MODE — query LightRAG di background untuk evaluasi
+        if engine == "shadow":
+            shadow_lightrag_task = _run_shadow_lightrag_comparison(
+                normalized_question,
+                all_candidates,
+            )
     
     # 4. EMPTY CHECK
     total_duration = time.time() - start_time
