@@ -2,29 +2,13 @@ import os
 import sys
 import logging
 import traceback
-from typing import Dict, Any, List, Optional
-
-from sentence_transformers import SentenceTransformer
-from qdrant_client import AsyncQdrantClient
-from qdrant_client.http import models as qdrant_models
+from typing import Dict, Any
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from config import config
-from shared.utils import encode_texts
 from shared.lightrag_sync import fire_lightrag_sync_text, fire_lightrag_delete
 
 logger = logging.getLogger("rag_text.sync")
-
-model: SentenceTransformer = None
-qdrant: AsyncQdrantClient = None
-
-
-def set_instances(embedding_model: SentenceTransformer, qdrant_client: AsyncQdrantClient):
-    """Set global instances."""
-    global model, qdrant
-    model = embedding_model
-    qdrant = qdrant_client
 
 
 async def sync_data(action: str, content: Any) -> Dict[str, Any]:
@@ -36,24 +20,6 @@ async def sync_data(action: str, content: Any) -> Dict[str, Any]:
                     "error": {"type": "ValidationError", "message": "Content harus berupa list"}
                 }
             
-            vectors = await encode_texts([item["question_rag_name"] for item in content], model=model, prefix="passage: ")
-            points = []
-            for item, vector in zip(content, vectors):
-                point_id = str(item["question_rag_id"])
-                points.append({
-                    "id": point_id,
-                    "vector": vector,
-                    "payload": {
-                        "question_id": item["question_id"],
-                        "answer_id": item["answer_id"],
-                        "category_id": item["category_id"],
-                        "question": item["question"],
-                        "question_rag_name": item["question_rag_name"]
-                    }
-                })
-            
-            logger.info(f"[SYNC-DATA] Sinkronisasi {len(points)} data ke Knowledge Bank berhasil")
-
             # Fire-and-forget: sync ke LightRAG
             for item in content:
                 fire_lightrag_sync_text(
@@ -69,8 +35,8 @@ async def sync_data(action: str, content: Any) -> Dict[str, Any]:
 
             return {
                 "status": "success",
-                "message": f"Sinkronisasi {len(points)} data berhasil",
-                "total_synced": len(points)
+                "message": f"Sinkronisasi {len(content)} data berhasil",
+                "total_synced": len(content)
             }
         
         elif action == "add":

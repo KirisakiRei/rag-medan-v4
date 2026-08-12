@@ -9,7 +9,6 @@ import uuid
 from datetime import datetime
 from typing import Dict, Any, List, Optional
 
-from sentence_transformers import SentenceTransformer
 from qdrant_client import AsyncQdrantClient
 from qdrant_client.http import models as qdrant_models
 from qdrant_client.http.models import PointStruct
@@ -22,11 +21,9 @@ from services.rag_document.chunker import ChunkItem
 from services.rag_web.scraper import scraper, WebScrapeError
 from services.rag_web.cleaner import cleaner
 from services.rag_web import chunker as web_chunker
-from shared.utils import encode_texts
 
 logger = logging.getLogger("rag_web.sync")
 
-model: SentenceTransformer = None
 qdrant: AsyncQdrantClient = None
 
 _STATE_VECTOR = [0.0]
@@ -49,10 +46,9 @@ def release_job(web_bank_id: str) -> None:
         _active_jobs.discard(web_bank_id)
 
 
-def set_instances(embedding_model: SentenceTransformer, qdrant_client: AsyncQdrantClient):
-    """Set global instances."""
-    global model, qdrant
-    model = embedding_model
+def set_instances(qdrant_client: AsyncQdrantClient):
+    """Set global Qdrant instance."""
+    global qdrant
     qdrant = qdrant_client
 
 
@@ -240,80 +236,11 @@ async def store_chunks(
     opd_id: str,
     url: str,
     title: Optional[str],
-    parent_chunks: List[ChunkItem],
     child_chunks: List[ChunkItem],
-    child_embeddings: List[List[float]],
     content_hash: str,
-    scraped_at: str,
     is_active: bool = True,
-    metadata: Optional[Dict[str, Any]] = None,
-) -> List[str]:
-    """Store chunks to Qdrant."""
-    if len(child_chunks) != len(child_embeddings):
-        raise ValueError("Child chunks and embeddings count mismatch")
-
-    points = []
-    point_ids = []
-    now = _utcnow_iso()
-
-    def build_payload(chunk: ChunkItem, total_chunks: int) -> Dict[str, Any]:
-        payload = {
-            "web_bank_id": web_bank_id,
-            "link_id": web_bank_id,
-            "name": name,
-            "opd_id": opd_id,
-            "url": url,
-            "title": title or "",
-            "content": chunk.text,
-            "chunk_index": chunk.block_order,
-            "total_chunks": total_chunks,
-            "token_count": chunk.token_count,
-            "content_hash": content_hash,
-            "scraped_at": scraped_at,
-            "chunk_id": chunk.chunk_id,
-            "chunk_level": chunk.chunk_level,
-            "chunk_kind": chunk.chunk_kind,
-            "source_kind": chunk.source_kind,
-            "section_title": chunk.section_title,
-            "heading_path": chunk.heading_path,
-            "page_start": chunk.page_start,
-            "page_end": chunk.page_end,
-            "parent_chunk_id": chunk.parent_chunk_id,
-            "window_prev_id": chunk.window_prev_id,
-            "window_next_id": chunk.window_next_id,
-            "is_active": is_active,
-            "is_deleted": False,
-            "created_at": now,
-            "updated_at": now,
-            "metadata": {**(metadata or {}), **chunk.metadata},
-        }
-        return {k: v for k, v in payload.items() if v is not None}
-
-    for chunk in parent_chunks:
-        points.append(
-            PointStruct(
-                id=chunk.chunk_id,
-                vector=[0.0] * config.EMBEDDING_DIMENSION,
-                payload=build_payload(chunk, len(child_chunks)),
-            )
-        )
-        point_ids.append(chunk.chunk_id)
-
-    for chunk, embedding in zip(child_chunks, child_embeddings):
-        vector = embedding.tolist() if hasattr(embedding, "tolist") else embedding
-        points.append(
-            PointStruct(
-                id=chunk.chunk_id,
-                vector=vector,
-                payload=build_payload(chunk, len(child_chunks)),
-            )
-        )
-        point_ids.append(chunk.chunk_id)
-
-    logger.info(
-        f"[SYNC] Stored (LightRAG only) {len(parent_chunks)} parent + {len(child_chunks)} child points "
-        f"for web_bank_id={web_bank_id}"
-    )
+) -> int:
+    """Forward chunks ke LightRAG (ingestion murni, tanpa Qdrant legacy)."""
 
     # Fire-and-forget: sync ke LightRAG
     clean_content = "\n\n".join(
@@ -328,7 +255,11 @@ async def store_chunks(
         is_active=is_active,
     )
 
-    return point_ids
+    logger.info(
+        f"[SYNC] Synced {len(child_chunks)} chunks to LightRAG "
+        f"for web_bank_id={web_bank_id}"
+    )
+    return len(child_chunks)
 
 
 async def get_chunks_by_web_bank_id(
@@ -770,31 +701,11 @@ async def process_url(
             chunks_count=len(child_chunks),
         )
 
-        chunk_texts = [chunk.text for chunk in child_chunks]
-        current_stage = "embedding"
-        _log_stage(
-            web_bank_id,
-            "embedding",
-            "Membuat embedding untuk seluruh child chunk",
-            job_id=job_id,
-            started_at=started_at,
-            chunks_count=len(chunk_texts),
-        )
-        embeddings = await encode_texts(chunk_texts, model=model, prefix="passage: ")
-        _log_stage(
-            web_bank_id,
-            "embedding",
-            "Embedding selesai dibuat",
-            job_id=job_id,
-            started_at=started_at,
-            embedding_count=len(embeddings),
-        )
-
         current_stage = "cleanup"
         _log_stage(
             web_bank_id,
             "cleanup",
-            "Menghapus chunk lama sebelum upsert baru",
+            "Membersihkan index lama sebelum sync baru",
             job_id=job_id,
             started_at=started_at,
         )
@@ -803,10 +714,9 @@ async def process_url(
         _log_stage(
             web_bank_id,
             "upsert",
-            "Menyimpan parent dan child chunk baru ke Qdrant",
+            "Mengirim chunk baru ke LightRAG",
             job_id=job_id,
             started_at=started_at,
-            parent_chunks=len(parent_chunks),
             chunks_count=len(child_chunks),
         )
         await store_chunks(
@@ -815,17 +725,9 @@ async def process_url(
             opd_id=opd_id,
             url=url,
             title=title,
-            parent_chunks=parent_chunks,
             child_chunks=child_chunks,
-            child_embeddings=embeddings,
             content_hash=content_hash,
-            scraped_at=scraped_at,
             is_active=is_active,
-            metadata={
-                **(metadata or {}),
-                "css_selector": css_selector,
-                "scrape_interval": scrape_interval,
-            },
         )
 
         result = {
@@ -1199,15 +1101,6 @@ async def sync_edited_content(
                 "error": "No chunks created from edited content",
             }
 
-        chunk_texts = [chunk.text for chunk in child_chunks]
-        _log_stage(
-            web_bank_id,
-            "edit_sync",
-            "Membuat embedding untuk child chunk hasil edit",
-            started_at=started_at,
-            chunks_count=len(chunk_texts),
-        )
-        embeddings = await encode_texts(chunk_texts, model=model, prefix="passage: ")
         content_hash = _content_hash(clean_content)
         paragraph_count = _count_paragraphs(clean_content)
         scraped_at = _utcnow_iso()
@@ -1217,7 +1110,6 @@ async def sync_edited_content(
             "edit_sync",
             "Mengganti chunk lama dengan hasil edit",
             started_at=started_at,
-            parent_chunks=len(parent_chunks),
             chunks_count=len(child_chunks),
         )
         await hard_delete_by_web_bank_id(web_bank_id)
@@ -1227,13 +1119,9 @@ async def sync_edited_content(
             opd_id=opd_id,
             url=url,
             title=title,
-            parent_chunks=parent_chunks,
             child_chunks=child_chunks,
-            child_embeddings=embeddings,
             content_hash=content_hash,
-            scraped_at=scraped_at,
             is_active=is_active,
-            metadata={"is_edited": True, "edited_at": scraped_at},
         )
 
         await upsert_web_state(

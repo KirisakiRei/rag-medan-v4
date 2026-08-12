@@ -24,6 +24,34 @@ from services.lightrag_adapter.source_mapper import (
 logger = logging.getLogger("lightrag_adapter.references")
 
 
+def _parse_source_descriptor(doc_descriptor: str) -> tuple[str, str]:
+    """
+    Parse source descriptor ke (source_type, source_id).
+
+    Mendukung dua format:
+    - Lengkap: "kb:medan-main:web:019d3e2c-..." (dari make_document_id)
+    - Sederhana: "web:019d3e2c-..." (dari file_source ingest)
+
+    Returns:
+        (source_type, source_id); keduanya "" jika tidak bisa di-parse.
+    """
+    if not doc_descriptor:
+        return "", ""
+
+    parts = doc_descriptor.split(":")
+    if len(parts) >= 4 and parts[0] == "kb":
+        source_type = parts[2]
+        source_id = ":".join(parts[3:])
+        return source_type, source_id
+
+    if len(parts) >= 2 and parts[0] in ("text", "document", "web"):
+        source_type = parts[0]
+        source_id = ":".join(parts[1:])
+        return source_type, source_id
+
+    return "", ""
+
+
 def map_lightrag_context_to_canonical(
     lightrag_contexts: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
@@ -61,12 +89,15 @@ def map_lightrag_context_to_canonical(
         try:
             kb_id, source_type, source_id = parse_document_id(doc_id)
         except Exception:
-            logger.warning(
-                f"Cannot parse doc_id '{doc_id}', "
-                f"skipping reference mapping"
-            )
-            source_type = "unknown"
-            source_id = doc_id
+            # Fallback: coba parse descriptor sederhana ("web:<id>")
+            source_type, source_id = _parse_source_descriptor(doc_id)
+            if not source_type:
+                logger.warning(
+                    f"Cannot parse doc_id '{doc_id}', "
+                    f"skipping reference mapping"
+                )
+                source_type = "unknown"
+                source_id = doc_id
 
         # Build logical source URI
         source_uri = make_source_uri(source_type, source_id)

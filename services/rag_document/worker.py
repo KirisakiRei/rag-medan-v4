@@ -17,8 +17,7 @@ import requests
 import urllib3
 from qdrant_client import QdrantClient
 from qdrant_client.http import models as qdrant_models
-from qdrant_client.http.models import Distance, PointStruct, VectorParams
-from sentence_transformers import SentenceTransformer
+from qdrant_client.http.models import Distance, VectorParams
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -44,8 +43,6 @@ for handler in logger.handlers:
 
 _PROJECT_ROOT = Path(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 _PROGRESS_PREFIX = "__PROGRESS__"
-_EMBED_BATCH_SIZE = 32
-_UPSERT_BATCH_SIZE = 50
 
 
 def emit_progress(stage: str, message: str, **extra) -> None:
@@ -339,82 +336,6 @@ def _get_existing_doc_id(point: Optional[object]) -> Optional[str]:
     return None
 
 
-def _embed_with_shared_service(texts: List[str]) -> List[List[float]]:
-    response = requests.post(
-        f"{config.SHARED_EMBEDDING_URL.rstrip('/')}/embed",
-        json={
-            "texts": texts,
-            "prefix": "passage: ",
-            "model_size": "large",
-        },
-        headers={"X-API-Key": config.INTERNAL_API_KEY},
-        timeout=max(120, config.OCR_TIMEOUT),
-    )
-    response.raise_for_status()
-    payload = response.json()
-    return payload.get("embeddings", [])
-
-
-def _embed_chunks(
-    chunk_items: List[dict],
-    progress_callback: Callable[..., None],
-) -> List[List[float]]:
-    total_chunks = len(chunk_items)
-    all_embeddings: List[List[float]] = []
-    local_model: Optional[SentenceTransformer] = None
-    use_shared = config.USE_SHARED_EMBEDDING
-
-    for start in range(0, total_chunks, _EMBED_BATCH_SIZE):
-        end = min(start + _EMBED_BATCH_SIZE, total_chunks)
-        batch_items = chunk_items[start:end]
-        batch_texts = [item["text"] for item in batch_items]
-        progress_callback(
-            stage="embedding",
-            message=f"Embedding chunk {start + 1}-{end}/{total_chunks}...",
-            processed_chunks=start,
-            total_chunks=total_chunks,
-        )
-
-        if use_shared:
-            try:
-                batch_embeddings = _embed_with_shared_service(batch_texts)
-            except Exception as e:
-                logger.warning(f"[EMBED] Shared embedding gagal, fallback lokal: {e}")
-                progress_callback(
-                    stage="embedding",
-                    message="Shared embedding tidak tersedia, fallback ke model lokal...",
-                    processed_chunks=start,
-                    total_chunks=total_chunks,
-                )
-                use_shared = False
-                local_model = SentenceTransformer(config.EMBEDDING_MODEL_PATH_LARGE)
-                batch_embeddings = local_model.encode(
-                    [f"passage: {text}" for text in batch_texts],
-                    batch_size=len(batch_texts),
-                    normalize_embeddings=True,
-                    show_progress_bar=False,
-                ).tolist()
-        else:
-            if local_model is None:
-                local_model = SentenceTransformer(config.EMBEDDING_MODEL_PATH_LARGE)
-            batch_embeddings = local_model.encode(
-                [f"passage: {text}" for text in batch_texts],
-                batch_size=len(batch_texts),
-                normalize_embeddings=True,
-                show_progress_bar=False,
-            ).tolist()
-
-        all_embeddings.extend(batch_embeddings)
-        progress_callback(
-            stage="embedding",
-            message=f"Embedding selesai {end}/{total_chunks} chunk.",
-            processed_chunks=end,
-            total_chunks=total_chunks,
-        )
-
-    return all_embeddings
-
-
 def process_document(
     task_id: str,
     doc_id: str,
@@ -544,131 +465,14 @@ def process_document(
             child_chunks=len(child_chunks),
         )
 
-        embeddings = _embed_chunks(
-            [{"page_number": item.page_start, "text": item.text} for item in child_chunks],
-            progress_callback=progress_callback,
+        # Kumpulkan teks semua child chunks untuk LightRAG sync
+        all_chunk_texts = [chunk_item.text for chunk_item in child_chunks]
+
+        progress_callback(
+            "completed",
+            f"Pipeline selesai. {total_chunks} chunk siap di-index ke LightRAG.",
+            total_chunks=total_chunks,
         )
-
-        progress_callback("upserting", f"Menghapus chunk lama untuk doc_id={doc_id}...")
-        try:
-            qdrant.delete(
-                collection_name=collection_name,
-                points_selector=qdrant_models.FilterSelector(
-                    filter=qdrant_models.Filter(
-                        must=[
-                            qdrant_models.FieldCondition(
-                                key="mysql_id",
-                                match=qdrant_models.MatchValue(value=doc_id),
-                            )
-                        ]
-                    )
-                ),
-            )
-        except Exception:
-            pass
-
-        now = datetime.utcnow().isoformat()
-        points = []
-        all_chunk_texts = []  # Kumpulkan teks untuk LightRAG sync
-
-        points_by_id = {}
-
-        for parent_item in parent_chunks:
-            parent_payload = {
-                "mysql_id": doc_id,
-                "organization_id": organization_id,
-                "opd": organization_id,
-                "filename": document_filename,
-                "text": parent_item.text,
-                "page_number": parent_item.page_start,
-                "chunk_index": parent_item.block_order,
-                "total_chunks": total_chunks,
-                "section": parent_item.section_title,
-                "summary": "",
-                "file_hash": file_hash,
-                "content_hash": content_hash,
-                "chunk_id": parent_item.chunk_id,
-                "chunk_level": parent_item.chunk_level,
-                "chunk_kind": parent_item.chunk_kind,
-                "source_kind": parent_item.source_kind,
-                "section_title": parent_item.section_title,
-                "heading_path": parent_item.heading_path,
-                "page_start": parent_item.page_start,
-                "page_end": parent_item.page_end,
-                "parent_chunk_id": None,
-                "window_prev_id": None,
-                "window_next_id": None,
-                "is_active": is_active,
-                "is_deleted": False,
-                "created_at": now,
-                "updated_at": now,
-                **parent_item.metadata,
-            }
-            parent_point = PointStruct(
-                id=parent_item.chunk_id,
-                vector=[0.0] * config.EMBEDDING_DIMENSION_LARGE,
-                payload=parent_payload,
-            )
-            points_by_id[parent_item.chunk_id] = parent_point
-
-        for i, (chunk_item, embedding) in enumerate(zip(child_chunks, embeddings)):
-            all_chunk_texts.append(chunk_item.text)
-            payload = {
-                "mysql_id": doc_id,
-                "organization_id": organization_id,
-                "opd": organization_id,
-                "filename": document_filename,
-                "text": chunk_item.text,
-                "page_number": chunk_item.page_start,
-                "chunk_index": i,
-                "total_chunks": total_chunks,
-                "section": chunk_item.section_title,
-                "summary": "",
-                "file_hash": file_hash,
-                "content_hash": content_hash,
-                "chunk_id": chunk_item.chunk_id,
-                "chunk_level": chunk_item.chunk_level,
-                "chunk_kind": chunk_item.chunk_kind,
-                "source_kind": chunk_item.source_kind,
-                "section_title": chunk_item.section_title,
-                "heading_path": chunk_item.heading_path,
-                "page_start": chunk_item.page_start,
-                "page_end": chunk_item.page_end,
-                "parent_chunk_id": chunk_item.parent_chunk_id,
-                "window_prev_id": chunk_item.window_prev_id,
-                "window_next_id": chunk_item.window_next_id,
-                "is_active": is_active,
-                "is_deleted": False,
-                "created_at": now,
-                "updated_at": now,
-                **chunk_item.metadata,
-            }
-            vector = embedding.tolist() if hasattr(embedding, "tolist") else embedding
-            points.append(PointStruct(id=chunk_item.chunk_id, vector=vector, payload=payload))
-
-            if len(points) >= _UPSERT_BATCH_SIZE:
-                # Removed qdrant.upsert
-                points = []
-                progress_callback(
-                    "upserting",
-                    f"Upsert selesai {i + 1}/{total_chunks} chunk.",
-                    processed_chunks=i + 1,
-                    total_chunks=total_chunks,
-                )
-
-        if points_by_id:
-            pass # Removed qdrant upsert
-
-        if points:
-            pass # Removed qdrant upsert
-            progress_callback(
-                "upserting",
-                f"Upsert selesai {total_chunks}/{total_chunks} chunk.",
-                processed_chunks=total_chunks,
-                total_chunks=total_chunks,
-            )
-
-        progress_callback("completed", f"Pipeline selesai. {total_chunks} chunk berhasil terindeks.", total_chunks=total_chunks)
         logger.info(f"[WORKER] ========== DONE task={task_id} chunks={total_chunks} ==========")
 
         # Fire-and-forget: sync ke LightRAG (background thread)

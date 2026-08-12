@@ -27,9 +27,8 @@ qdrant: AsyncQdrantClient = None
 
 
 def _wire_model(model):
-    """Wire loaded local model into search/sync modules."""
+    """Wire loaded local model ke search module."""
     search_module.set_instances(model, qdrant)
-    sync_module.set_instances(model, qdrant)
 
 
 model_holder = LazyModel(
@@ -67,7 +66,6 @@ async def init_qdrant():
 
     # Wire Qdrant-dependent modules immediately (model di-wire saat lazy load)
     search_module.set_instances(model_holder.model, qdrant)
-    sync_module.set_instances(model_holder.model, qdrant)
 
     logger.info(f"Qdrant connected: {config.QDRANT_HOST}:{config.QDRANT_PORT}")
 

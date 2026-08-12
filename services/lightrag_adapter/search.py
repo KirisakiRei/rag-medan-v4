@@ -85,6 +85,7 @@ async def search(
         # LightRAG bisa return context dalam berbagai format tergantung versi:
         # - "contexts" list
         # - "retrieved_contexts" list
+        # - "references" list (saat response_type=default / answer generation)
         # - "response" string (single generated answer)
         raw_contexts = (
             lightrag_result.get("contexts")
@@ -92,11 +93,37 @@ async def search(
             or []
         )
 
-        # Fallback: jika tidak ada structured contexts, coba extract dari response
+        # Fallback 1: extract contexts dari references (berisi file_source
+        # yang kita set saat ingest: "web:<id>", "document:<id>", "text:<id>").
+        if not raw_contexts:
+            references = (
+                lightrag_result.get("references")
+                or lightrag_result.get("retrieved_contexts")
+                or []
+            )
+            for ref in references:
+                doc_descriptor = (
+                    ref.get("file_source")
+                    or ref.get("file_path")
+                    or ref.get("source")
+                    or ref.get("document_id")
+                    or ""
+                )
+                raw_contexts.append({
+                    "content": ref.get("content") or ref.get("text") or "",
+                    "doc_id": doc_descriptor,
+                    "title": ref.get("source") or ref.get("title") or "",
+                    "score": ref.get("score"),
+                })
+
+        # Fallback 2: jika tetap tidak ada structured contexts,
+        # gunakan generated response sebagai single context.
         if not raw_contexts and isinstance(lightrag_result.get("response"), str):
             raw_contexts = [{
                 "content": lightrag_result["response"],
-                "doc_id": "unknown",
+                "doc_id": "",
+                "title": "",
+                "score": None,
             }]
 
         # Map ke canonical format

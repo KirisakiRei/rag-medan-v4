@@ -102,10 +102,9 @@ async def init_qdrant():
     except Exception as e:
         logger.error(f"Qdrant init error: {e}")
 
-    # Wire Qdrant-dependent modules immediately so delete/search paths are ready
+    # Wire Qdrant-dependent modules immediately so search path is ready
     # even before the lazy embedding model is first loaded.
     search_module.set_instances(model_holder.model, qdrant)
-    delete_module.set_instances(qdrant)
 
     logger.info(f"Qdrant connected: {config.QDRANT_HOST}:{config.QDRANT_PORT}")
 

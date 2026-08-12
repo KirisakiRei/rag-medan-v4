@@ -674,48 +674,65 @@ async def unified_search(
             }
         }
     
-    # 5. AI RELEVANCE CHECK
-    selected_candidate, ai_reason, candidates_checked, relevance_duration = \
-        await check_relevance_by_mode(all_candidates, user_question, max_check=5)
     extraction_failure_candidate = None
-    
-    # 5.5 AI EXTRACTION FOR DOCUMENT & WEB
-    if selected_candidate:
-        source = selected_candidate.get("source", "unknown")
-        if source in ["document", "web"]:
-            logger.info(f"[AI-EXTRACT] Extracting answer from {source.upper()}...")
-            extract_start = time.time()
-            raw_text = selected_candidate.get("answer_doc", "")
-            
-            # Prepare metadata
-            metadata = {}
-            if source == "document":
-                metadata = selected_candidate.get("document_info", {})
-            elif source == "web":
-                metadata = selected_candidate.get("web_info", {})
-                
-            extracted_answer = await ai_extract_answer(
-                user_question, 
-                raw_text, 
-                source, 
-                metadata
-            )
 
-            is_valid_answer, invalid_reason = validate_extracted_answer(extracted_answer)
-            if is_valid_answer:
-                selected_candidate["answer_doc"] = extracted_answer.strip()
-                logger.info("[AI-EXTRACT] Valid answer accepted")
-            else:
-                selected_candidate["answer_doc"] = "Tidak ditemukan"
-                selected_candidate["note"] = f"invalid_extraction_{invalid_reason}"
-                extraction_failure_candidate = selected_candidate
-                selected_candidate = None
-                ai_reason = f"AI extraction rejected: {invalid_reason}"
-                logger.warning(f"[AI-EXTRACT] Invalid answer rejected: {invalid_reason}")
-            
-            extract_duration = time.time() - extract_start
-            logger.info(f"[AI-EXTRACT] Done in {extract_duration:.2f}s")
-            
+    if engine == "lightrag":
+        # 5. LIGHTRAG SHORT-CIRCUIT
+        # LightRAG sudah generate jawaban final + relevance check inheren di
+        # retrieval & generation-nya. Lewati AI relevance + extraction ganda.
+        selected_candidate = all_candidates[0] if all_candidates else None
+        ai_reason = "Jawaban di-generate oleh LightRAG engine"
+        candidates_checked = 1
+        relevance_duration = 0.0
+        if selected_candidate:
+            logger.info(
+                f"[ENGINE] LightRAG short-circuit: langsung ambil jawaban "
+                f"(score={selected_candidate.get('final_score', 0):.4f})"
+            )
+        else:
+            logger.warning("[ENGINE] LightRAG short-circuit: no candidate")
+    else:
+        # 5. AI RELEVANCE CHECK (LEGACY / SHADOW)
+        selected_candidate, ai_reason, candidates_checked, relevance_duration = \
+            await check_relevance_by_mode(all_candidates, user_question, max_check=5)
+        
+        # 5.5 AI EXTRACTION FOR DOCUMENT & WEB
+        if selected_candidate:
+            source = selected_candidate.get("source", "unknown")
+            if source in ["document", "web"]:
+                logger.info(f"[AI-EXTRACT] Extracting answer from {source.upper()}...")
+                extract_start = time.time()
+                raw_text = selected_candidate.get("answer_doc", "")
+                
+                # Prepare metadata
+                metadata = {}
+                if source == "document":
+                    metadata = selected_candidate.get("document_info", {})
+                elif source == "web":
+                    metadata = selected_candidate.get("web_info", {})
+                    
+                extracted_answer = await ai_extract_answer(
+                    user_question, 
+                    raw_text, 
+                    source, 
+                    metadata
+                )
+
+                is_valid_answer, invalid_reason = validate_extracted_answer(extracted_answer)
+                if is_valid_answer:
+                    selected_candidate["answer_doc"] = extracted_answer.strip()
+                    logger.info("[AI-EXTRACT] Valid answer accepted")
+                else:
+                    selected_candidate["answer_doc"] = "Tidak ditemukan"
+                    selected_candidate["note"] = f"invalid_extraction_{invalid_reason}"
+                    extraction_failure_candidate = selected_candidate
+                    selected_candidate = None
+                    ai_reason = f"AI extraction rejected: {invalid_reason}"
+                    logger.warning(f"[AI-EXTRACT] Invalid answer rejected: {invalid_reason}")
+                
+                extract_duration = time.time() - extract_start
+                logger.info(f"[AI-EXTRACT] Done in {extract_duration:.2f}s")
+
     total_duration = time.time() - start_time
     
     # 6. BUILD RESPONSE
