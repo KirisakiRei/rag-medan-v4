@@ -11,6 +11,8 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 import uvicorn
 from sentence_transformers import SentenceTransformer
+from pydantic import BaseModel
+from typing import List, Union
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
@@ -166,8 +168,62 @@ async def embed(request: EmbedRequest):
     )
 
 
-def start_service():
-    """Start the service."""
+# ============== OPENAI-COMPATIBLE ENDPOINT (untuk LightRAG) ==============
+
+class OpenAIEmbedRequest(BaseModel):
+    """OpenAI-compatible embedding request."""
+    input: Union[List[str], str]
+    model: str = "intfloat/multilingual-e5-small"
+    encoding_format: str = "float"
+
+
+class OpenAIEmbeddingObject(BaseModel):
+    """Single embedding object in OpenAI format."""
+    object: str = "embedding"
+    index: int
+    embedding: List[float]
+
+
+class OpenAIEmbedResponse(BaseModel):
+    """OpenAI-compatible embedding response."""
+    object: str = "list"
+    data: List[OpenAIEmbeddingObject]
+    model: str
+    usage: dict
+
+
+@app.post("/v1/embeddings", response_model=OpenAIEmbedResponse)
+async def openai_embed(request: OpenAIEmbedRequest):
+    """
+    OpenAI-compatible embedding endpoint.
+    Digunakan oleh LightRAG Server untuk generate embeddings.
+    """
+    texts = request.input if isinstance(request.input, list) else [request.input]
+    if not texts:
+        raise HTTPException(status_code=400, detail="input must not be empty")
+
+    model = await get_small_model()
+    loop = asyncio.get_event_loop()
+    embeddings = await loop.run_in_executor(
+        _thread_pool,
+        _encode_sync,
+        model,
+        texts,
+    )
+
+    data = [
+        OpenAIEmbeddingObject(index=i, embedding=emb)
+        for i, emb in enumerate(embeddings)
+    ]
+
+    return OpenAIEmbedResponse(
+        data=data,
+        model=request.model,
+        usage={"prompt_tokens": sum(len(t.split()) for t in texts), "total_tokens": sum(len(t.split()) for t in texts)},
+    )
+
+
+def start_service():    """Start the service."""
     uvicorn.run(
         "services.embedding_service.main:app",
         host="0.0.0.0",
