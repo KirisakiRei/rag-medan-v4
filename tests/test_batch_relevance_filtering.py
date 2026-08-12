@@ -71,8 +71,11 @@ class BatchRelevanceFilteringTests(unittest.TestCase):
         prompt = _load_default_batch_prompt()
 
         self.assertNotIn('"selected_rank": 1 atau null', prompt)
-        self.assertIn('{"relevant": true, "selected_rank": 1', prompt)
-        self.assertIn('{"relevant": false, "selected_rank": null', prompt)
+        self.assertIn('"candidate_assessments"', prompt)
+        self.assertIn('"selected_rank":1', prompt)
+        self.assertIn('"selected_rank":null', prompt)
+        self.assertIn('text > document > web', prompt)
+        self.assertIn('confidence minimal 0.85', prompt)
 
     def test_database_mode_overrides_config_default(self):
         filtering = _load_filtering_module()
@@ -118,10 +121,15 @@ class BatchRelevanceFilteringTests(unittest.TestCase):
                 "answer": "Hotel A dan Hotel B.",
                 "reason": "Kandidat kedua memuat daftar hotel.",
                 "reformulated_question": "",
+                "candidate_assessments": [
+                    {"rank": 1, "relevant": False, "confidence": 0.3, "answer": "", "reason": "Tidak menjawab."},
+                    {"rank": 2, "relevant": True, "confidence": 0.91, "answer": "Hotel A dan Hotel B.", "reason": "Memuat daftar."},
+                ],
             })
 
+        valid_override = "CUSTOM candidate_assessments text > document > web threshold 0.85"
         filtering.get_cached_variable = (
-            lambda key: "CUSTOM BATCH PROMPT" if key == "prompt_ai_combined_judge" else None
+            lambda key: valid_override if key == "prompt_ai_combined_judge" else None
         )
         filtering.call_filter_llm = call_filter_llm
 
@@ -130,7 +138,7 @@ class BatchRelevanceFilteringTests(unittest.TestCase):
             _candidates(),
         ))
 
-        self.assertEqual(captured["system_prompt"], "CUSTOM BATCH PROMPT")
+        self.assertEqual(captured["system_prompt"], valid_override)
         self.assertIn('"rank": 1', captured["user_message"])
         self.assertIn('"source": "text"', captured["user_message"])
         self.assertIn('"content": "Daftar hotel: Hotel A dan Hotel B."', captured["user_message"])
@@ -171,6 +179,10 @@ class BatchRelevanceFilteringTests(unittest.TestCase):
                 "answer": "",
                 "reason": "Tidak ada kandidat yang menjawab.",
                 "reformulated_question": "Daftar hotel apa saja di Medan?",
+                "candidate_assessments": [
+                    {"rank": 1, "relevant": False, "confidence": 0.2, "answer": "", "reason": "Tidak menjawab."},
+                    {"rank": 2, "relevant": False, "confidence": 0.2, "answer": "", "reason": "Tidak menjawab."},
+                ],
             })
 
         filtering.call_filter_llm = call_filter_llm
@@ -224,6 +236,10 @@ class BatchRelevanceFilteringTests(unittest.TestCase):
                 "answer": "",
                 "reason": "Tidak ada kandidat yang menjawab.",
                 "reformulated_question": "",
+                "candidate_assessments": [
+                    {"rank": 1, "relevant": False, "confidence": 0.2, "answer": "", "reason": "Tidak menjawab."},
+                    {"rank": 2, "relevant": False, "confidence": 0.2, "answer": "", "reason": "Tidak menjawab."},
+                ],
             })
 
         filtering.get_cached_variable = lambda _key: None

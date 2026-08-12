@@ -366,11 +366,14 @@ async def ai_check_batch_relevance(
 ) -> Optional[Dict[str, Any]]:
     """Evaluate ordered RAG candidates in one LLM request."""
     batch_candidates = []
-    for rank, candidate in enumerate(candidates[:5], start=1):
+    for rank, candidate in enumerate(candidates[:9], start=1):
         content = str(candidate.get("content_for_check", "") or "")[:2000]
         batch_candidates.append({
             "rank": rank,
             "source": candidate.get("source", "unknown"),
+            "source_priority": {"text": 1, "document": 2, "web": 3}.get(
+                candidate.get("source", "unknown"), 99
+            ),
             "final_score": candidate.get("final_score", 0.0),
             "note": candidate.get("note", ""),
             "content": content,
@@ -385,12 +388,18 @@ async def ai_check_batch_relevance(
         }
 
     try:
-        prompt = (
-            # Key baru: jangan gunakan override DB lama yang masih memakai
-            # kontrak tanpa confidence + answer.
-            get_cached_variable("prompt_ai_combined_judge")
-            or PROMPT_AI_BATCH_RELEVANCE
-        )
+        prompt_override = get_cached_variable("prompt_ai_combined_judge")
+        if prompt_override and not (
+            "candidate_assessments" in prompt_override
+            and "text > document > web" in prompt_override
+            and "0.85" in prompt_override
+        ):
+            logger.error(
+                "[AI-BATCH] Override prompt_ai_combined_judge tidak memenuhi "
+                "kontrak source-priority v2; memakai prompt default"
+            )
+            prompt_override = None
+        prompt = prompt_override or PROMPT_AI_BATCH_RELEVANCE
         user_message = json.dumps(
             {
                 "user_question": user_question,
@@ -459,6 +468,56 @@ async def ai_check_batch_relevance(
             logger.warning("[AI-BATCH] answer must be empty when relevant=false")
             return None
 
+        assessments = parsed.get("candidate_assessments")
+        if not isinstance(assessments, list) or len(assessments) != len(batch_candidates):
+            logger.warning("[AI-BATCH] candidate_assessments must cover every candidate")
+            return None
+
+        normalized_assessments = []
+        seen_ranks = set()
+        for assessment in assessments:
+            if not isinstance(assessment, dict):
+                return None
+            rank = assessment.get("rank")
+            item_relevant = assessment.get("relevant")
+            item_confidence = assessment.get("confidence")
+            item_answer = assessment.get("answer")
+            item_reason = assessment.get("reason")
+            if (
+                isinstance(rank, bool)
+                or not isinstance(rank, int)
+                or rank < 1
+                or rank > len(batch_candidates)
+                or rank in seen_ranks
+                or type(item_relevant) is not bool
+                or isinstance(item_confidence, bool)
+                or not isinstance(item_confidence, (int, float))
+                or not 0.0 <= float(item_confidence) <= 1.0
+                or not isinstance(item_answer, str)
+                or not isinstance(item_reason, str)
+            ):
+                logger.warning("[AI-BATCH] Invalid candidate assessment contract")
+                return None
+            seen_ranks.add(rank)
+            source = batch_candidates[rank - 1]["source"]
+            item_answer = item_answer.strip()
+            if source == "text" and item_answer:
+                logger.warning("[AI-BATCH] Text assessment answer must be empty")
+                return None
+            if item_relevant and source != "text" and not item_answer:
+                logger.warning("[AI-BATCH] Relevant document/web assessment needs answer")
+                return None
+            if not item_relevant and item_answer:
+                logger.warning("[AI-BATCH] Irrelevant assessment answer must be empty")
+                return None
+            normalized_assessments.append({
+                "rank": rank,
+                "relevant": item_relevant,
+                "confidence": float(item_confidence),
+                "answer": item_answer,
+                "reason": item_reason.strip() or "-",
+            })
+
         reason = parsed.get("reason")
         reformulated_question = parsed.get("reformulated_question")
         if not isinstance(reason, str):
@@ -481,6 +540,7 @@ async def ai_check_batch_relevance(
             "answer": answer,
             "reason": reason.strip() or "-",
             "reformulated_question": reformulated,
+            "candidate_assessments": normalized_assessments,
         }
 
     except Exception as e:

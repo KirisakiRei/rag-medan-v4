@@ -177,6 +177,10 @@ class DocumentAnswerResponseTests(unittest.TestCase):
                 "answer": "",
                 "reason": "Kandidat kedua relevan.",
                 "reformulated_question": "",
+                "candidate_assessments": [
+                    {"rank": 1, "relevant": False, "confidence": 0.3, "answer": "", "reason": "Tidak relevan."},
+                    {"rank": 2, "relevant": True, "confidence": 0.91, "answer": "", "reason": "Kandidat kedua relevan."},
+                ],
             }
 
         handler.ai_check_batch_relevance = ai_check_batch_relevance
@@ -192,7 +196,7 @@ class DocumentAnswerResponseTests(unittest.TestCase):
         self.assertEqual(selected["judge_confidence"], 0.91)
         self.assertEqual(checked, 2)
 
-    def test_batch_keeps_high_score_shortcut(self):
+    def test_batch_does_not_bypass_judge_for_high_score(self):
         handler = _load_search_handler()
         candidate = _candidate()
         candidate["final_score"] = 0.91
@@ -210,9 +214,73 @@ class DocumentAnswerResponseTests(unittest.TestCase):
             handler.check_relevance_batch_with_ai([candidate], "pertanyaan", max_check=5)
         )
 
-        self.assertIs(selected, candidate)
+        self.assertIsNone(selected)
         self.assertEqual(checked, 1)
-        self.assertEqual(calls, 0)
+        self.assertEqual(calls, 1)
+
+    def test_source_priority_text_beats_higher_confidence_document_and_web(self):
+        handler = _load_search_handler()
+        candidates = [
+            {**_candidate("Jawaban web"), "source": "web"},
+            {**_candidate("Jawaban dokumen"), "source": "document"},
+            {**_candidate("Pertanyaan FAQ"), "source": "text", "answer_id": "faq-1"},
+        ]
+
+        async def judge(*_args, **_kwargs):
+            return {
+                "relevant": True,
+                "selected_rank": 1,
+                "confidence": 0.99,
+                "answer": "Jawaban web",
+                "reason": "Web sangat relevan.",
+                "reformulated_question": "",
+                "candidate_assessments": [
+                    {"rank": 1, "relevant": True, "confidence": 0.99, "answer": "Jawaban web", "reason": "Web relevan."},
+                    {"rank": 2, "relevant": True, "confidence": 0.96, "answer": "Jawaban dokumen", "reason": "Dokumen relevan."},
+                    {"rank": 3, "relevant": True, "confidence": 0.85, "answer": "", "reason": "FAQ semakna."},
+                ],
+            }
+
+        handler.ai_check_batch_relevance = judge
+        selected, _reason, _checked, _duration = asyncio.run(
+            handler.check_relevance_batch_with_ai(candidates, "pertanyaan", max_check=5)
+        )
+
+        self.assertIs(selected, candidates[2])
+        self.assertEqual(selected["source"], "text")
+        self.assertEqual(selected["judge_confidence"], 0.85)
+
+    def test_source_priority_document_wins_when_text_below_threshold(self):
+        handler = _load_search_handler()
+        candidates = [
+            {**_candidate("Pertanyaan FAQ"), "source": "text", "answer_id": "faq-1"},
+            {**_candidate("Jawaban web"), "source": "web"},
+            {**_candidate("Jawaban dokumen"), "source": "document"},
+        ]
+
+        async def judge(*_args, **_kwargs):
+            return {
+                "relevant": True,
+                "selected_rank": 2,
+                "confidence": 0.99,
+                "answer": "Jawaban web",
+                "reason": "Pilihan LLM sengaja melanggar prioritas.",
+                "reformulated_question": "",
+                "candidate_assessments": [
+                    {"rank": 1, "relevant": True, "confidence": 0.84, "answer": "", "reason": "FAQ di bawah threshold."},
+                    {"rank": 2, "relevant": True, "confidence": 0.99, "answer": "Jawaban web", "reason": "Web relevan."},
+                    {"rank": 3, "relevant": True, "confidence": 0.86, "answer": "Jawaban dokumen", "reason": "Dokumen relevan."},
+                ],
+            }
+
+        handler.ai_check_batch_relevance = judge
+        selected, _reason, _checked, _duration = asyncio.run(
+            handler.check_relevance_batch_with_ai(candidates, "pertanyaan", max_check=5)
+        )
+
+        self.assertIs(selected, candidates[2])
+        self.assertEqual(selected["source"], "document")
+        self.assertEqual(selected["answer_doc"], "Jawaban dokumen")
 
     def test_invalid_batch_response_fails_closed(self):
         handler = _load_search_handler()
@@ -308,6 +376,9 @@ class DocumentAnswerResponseTests(unittest.TestCase):
                 "answer": "",
                 "reason": "Tidak ada kandidat yang menjawab.",
                 "reformulated_question": "",
+                "candidate_assessments": [
+                    {"rank": 1, "relevant": False, "confidence": 0.2, "answer": "", "reason": "Tidak menjawab."},
+                ],
             }
 
         handler.parallel_search_services = parallel_search_services
@@ -343,6 +414,9 @@ class DocumentAnswerResponseTests(unittest.TestCase):
                 "answer": "Jawaban akhir dari combined judge.",
                 "reason": "Dokumen memuat jawaban.",
                 "reformulated_question": "",
+                "candidate_assessments": [
+                    {"rank": 1, "relevant": True, "confidence": 0.93, "answer": "Jawaban akhir dari combined judge.", "reason": "Dokumen memuat jawaban."},
+                ],
             }
 
         async def ai_extract_answer(*_args, **_kwargs):
@@ -387,6 +461,9 @@ class DocumentAnswerResponseTests(unittest.TestCase):
                     "answer": "",
                     "reason": "batch relevant",
                     "reformulated_question": "",
+                    "candidate_assessments": [
+                        {"rank": 1, "relevant": True, "confidence": 0.9, "answer": "", "reason": "batch relevant"},
+                    ],
                 }
 
             handler.parallel_search_services = parallel_search_services

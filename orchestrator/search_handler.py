@@ -87,8 +87,11 @@ def _infer_source_type(ctx: Dict[str, Any]) -> str:
     if re.search(r"^https?://", title):
         return "web"
 
-    # 5. Default generic question/text.
-    return "text"
+    # Provenance ambigu tidak boleh mendapat prioritas text secara otomatis.
+    return "unknown"
+
+
+_SOURCE_PRIORITY = {"text": 1, "document": 2, "web": 3}
 
 
 async def _run_lightrag_search(
@@ -119,7 +122,7 @@ async def _run_lightrag_search(
         )
     except Exception as e:
         logger.error(f"[LIGHTRAG-SEARCH] Adapter error: {e}")
-        return [], time.time() - search_start, 1
+        return [], time.time() - search_start, 1, ""
 
     search_duration = time.time() - search_start
     contexts = result.get("contexts", [])
@@ -134,6 +137,12 @@ async def _run_lightrag_search(
                 f"[LIGHTRAG-SEARCH] source_type tidak dikenal, fallback "
                 f"infer -> {source_type}"
             )
+        if source_type not in _SOURCE_PRIORITY:
+            logger.error(
+                f"[LIGHTRAG-SEARCH] Drop context tanpa provenance authoritative: "
+                f"id={ctx.get('source_id', '')} uri={ctx.get('source_uri', '')}"
+            )
+            continue
         content = ctx.get("content", "") or ""
         if not str(content).strip():
             # Context tanpa teks tidak bisa dijadikan kandidat jawaban.
@@ -160,6 +169,9 @@ async def _run_lightrag_search(
             "question": ctx.get("title", ""),
             "note": "lightrag_engine"
         }
+        candidate["source_id"] = str(ctx.get("source_id") or "")
+        candidate["source_uri"] = str(ctx.get("source_uri") or "")
+        candidate["reference_id"] = str(ctx.get("reference_id") or "")
         
         # Mapping spesifik metadata untuk legacy response compatibility
         if source_type == "text":
@@ -178,11 +190,45 @@ async def _run_lightrag_search(
             
         all_candidates.append(candidate)
         
-    # Sort berdasarkan skor
-    all_candidates.sort(key=lambda x: x.get("final_score", 0.0), reverse=True)
+    # Gabungkan chunks dari source yang sama agar satu source tidak memenuhi
+    # seluruh judge window dan menyingkirkan tier prioritas lain.
+    grouped_candidates = {}
+    for candidate in all_candidates:
+        key = (candidate.get("source"), candidate.get("source_id"))
+        existing = grouped_candidates.get(key)
+        if existing is None:
+            grouped_candidates[key] = candidate
+            continue
+        new_content = str(candidate.get("content_for_check") or "").strip()
+        old_content = str(existing.get("content_for_check") or "").strip()
+        if new_content and new_content not in old_content:
+            combined = f"{old_content}\n\n{new_content}".strip()[:6000]
+            existing["content_for_check"] = combined
+            existing["answer_doc"] = combined
+        existing["final_score"] = max(
+            float(existing.get("final_score") or 0.0),
+            float(candidate.get("final_score") or 0.0),
+        )
+
+    all_candidates = list(grouped_candidates.values())
+    # Prioritas bisnis deterministik lebih kuat dari skor retrieval.
+    all_candidates.sort(key=lambda x: (
+        _SOURCE_PRIORITY.get(x.get("source"), 99),
+        -float(x.get("final_score") or 0.0),
+    ))
     
-    # Ambil Top K
-    all_candidates = all_candidates[:top_k]
+    # Source-balanced judge window: maksimal 3 kandidat per tier. Ini mencegah
+    # banyak chunk dari satu source menyingkirkan source lain sepenuhnya.
+    per_source_limit = 3
+    balanced_candidates = []
+    for source_type in ("text", "document", "web"):
+        tier_candidates = [
+            candidate for candidate in all_candidates
+            if candidate.get("source") == source_type
+        ]
+        balanced_candidates.extend(tier_candidates[:per_source_limit])
+
+    all_candidates = balanced_candidates[:top_k]
     
     logger.info(f"[LIGHTRAG-SEARCH] Found {len(all_candidates)} mapped candidates in {search_duration:.2f}s")
     return all_candidates, search_duration, 1, generated_answer
@@ -405,7 +451,7 @@ async def check_relevance_with_ai(
 async def check_relevance_batch_with_ai(
     all_candidates: List[Dict[str, Any]],
     user_question: str,
-    max_check: int = 5,
+    max_check: int = 9,
 ) -> tuple[Dict[str, Any] | None, str, int, float]:
     """Check ordered candidates in one AI request, with single-mode fallback."""
     relevance_start = time.time()
@@ -413,19 +459,6 @@ async def check_relevance_batch_with_ai(
 
     if not batch_candidates:
         return None, "Tidak ada kandidat untuk diperiksa", 0, 0.0
-
-    top_candidate = batch_candidates[0]
-    top_score = top_candidate.get("final_score", 0)
-    if top_score >= 0.90:
-        logger.info(
-            f"[AI-RELEVANCE] BATCH: top score={top_score:.4f} -> HIGH SCORE, SKIP AI CHECK ✓"
-        )
-        return (
-            top_candidate,
-            "High confidence score (final >= 0.90)",
-            1,
-            time.time() - relevance_start,
-        )
 
     logger.info(
         f"[AI-RELEVANCE] BATCH: checking {len(batch_candidates)} candidates in one request"
@@ -444,31 +477,36 @@ async def check_relevance_batch_with_ai(
         )
 
     ai_reason = batch_result.get("reason", "-")
-    if not batch_result.get("relevant", False):
+    assessments = batch_result.get("candidate_assessments") or []
+    confidence_threshold = max(0.85, config.RELEVANCE_CONFIDENCE_THRESHOLD)
+    eligible = [
+        assessment for assessment in assessments
+        if assessment.get("relevant") is True
+        and float(assessment.get("confidence") or 0.0)
+        >= confidence_threshold
+    ]
+    if not eligible:
         relevance_duration = time.time() - relevance_start
         logger.info(
             f"[AI-RELEVANCE] BATCH: no relevant candidate | reason={ai_reason[:100]}"
         )
         return None, ai_reason, len(batch_candidates), relevance_duration
 
-    selected_rank = batch_result["selected_rank"]
+    # Pemilihan final dilakukan programatik agar LLM tidak dapat melanggar
+    # prioritas text > document > web.
+    chosen = min(eligible, key=lambda assessment: (
+        _SOURCE_PRIORITY.get(
+            batch_candidates[int(assessment["rank"]) - 1].get("source"), 99
+        ),
+        -float(assessment.get("confidence") or 0.0),
+        int(assessment["rank"]),
+    ))
+    selected_rank = int(chosen["rank"])
     selected_candidate = batch_candidates[selected_rank - 1]
-    confidence = float(batch_result.get("confidence", 0.0))
-    if confidence < config.RELEVANCE_CONFIDENCE_THRESHOLD:
-        relevance_duration = time.time() - relevance_start
-        logger.info(
-            f"[AI-RELEVANCE] BATCH: rejected confidence={confidence:.3f} "
-            f"< threshold={config.RELEVANCE_CONFIDENCE_THRESHOLD:.3f}"
-        )
-        return (
-            None,
-            f"Confidence {confidence:.3f} di bawah threshold "
-            f"{config.RELEVANCE_CONFIDENCE_THRESHOLD:.3f}",
-            len(batch_candidates),
-            relevance_duration,
-        )
+    confidence = float(chosen.get("confidence", 0.0))
+    ai_reason = str(chosen.get("reason") or ai_reason)
 
-    answer = str(batch_result.get("answer") or "").strip()
+    answer = str(chosen.get("answer") or "").strip()
     source = selected_candidate.get("source", "unknown")
     if source != "text":
         is_valid_answer, invalid_reason = validate_extracted_answer(answer)
@@ -742,7 +780,7 @@ async def unified_search(
         # 2 & 3. MAIN LIGHTRAG SEARCH
         logger.info("[ENGINE] Menggunakan LightRAG sebagai mesin pencarian utama")
         all_candidates, parallel_duration, services_queried, lightrag_answer = await _run_lightrag_search(
-            normalized_question, user_question, wa_number, top_k=5
+            normalized_question, user_question, wa_number, top_k=9
         )
     else:
         # 2. PARALLEL SEARCH (LEGACY / SHADOW)
@@ -799,13 +837,9 @@ async def unified_search(
     
     extraction_failure_candidate = None
     
-    # Masukkan generated answer dari LightRAG sebagai kandidat prioritas jika valid.
-    # Ini membantu LLM Router kita (Ranker v3) memvalidasi hasil olahan LightRAG.
-    if engine == "lightrag" and lightrag_answer and not _is_lightrag_negative_answer(lightrag_answer):
-        if all_candidates:
-            all_candidates[0]["content_for_check"] = lightrag_answer
-            all_candidates[0]["answer_doc"] = lightrag_answer
-            all_candidates[0]["note"] = "lightrag_generated_answer"
+    # Jawaban generatif LightRAG tidak ditempelkan ke evidence tertentu karena
+    # dapat berasal dari beberapa source dan akan merusak provenance. Combined
+    # judge mengekstrak jawaban hanya dari kandidat canonical terpilih.
 
     # 5. AI RELEVANCE CHECK (RANKER v3)
     # Berlaku untuk SEMUA engine (LightRAG maupun Legacy).
@@ -813,7 +847,7 @@ async def unified_search(
     if engine == "lightrag":
         logger.info("[AI-RELEVANCE] LightRAG: combined judge+extract mode")
         selected_candidate, ai_reason, candidates_checked, relevance_duration = \
-            await check_relevance_batch_with_ai(all_candidates, user_question, max_check=5)
+            await check_relevance_batch_with_ai(all_candidates, user_question, max_check=9)
     else:
         selected_candidate, ai_reason, candidates_checked, relevance_duration = \
             await check_relevance_by_mode(all_candidates, user_question, max_check=5)
