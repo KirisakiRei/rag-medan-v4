@@ -759,58 +759,25 @@ async def unified_search(
         }
     
     extraction_failure_candidate = None
+    
+    # Masukkan generated answer dari LightRAG sebagai kandidat prioritas jika valid.
+    # Ini membantu LLM Router kita (Ranker v3) memvalidasi hasil olahan LightRAG.
+    if engine == "lightrag" and lightrag_answer and not _is_lightrag_negative_answer(lightrag_answer):
+        if all_candidates:
+            all_candidates[0]["content_for_check"] = lightrag_answer
+            all_candidates[0]["answer_doc"] = lightrag_answer
+            all_candidates[0]["note"] = "lightrag_generated_answer"
 
-    if engine == "lightrag":
-        # 5. LIGHTRAG SHORT-CIRCUIT
-        # LightRAG sudah generate jawaban final (response) + retrieval
-        # inheren. Jawaban asli = generated_answer, bukan teks chunk.
-        #
-        # VALIDASI KETAT: hanya anggap "ketemu" jika:
-        #   a) Ada jawaban generate non-kosong dari LightRAG, DAN
-        #   b) Bukan placeholder "No relevant context found for the query.", DAN
-        #   c) Bukan kalimat "tidak tahu" (mis. "Maaf, ... tidak terdapat
-        #      di dalam konteks yang disediakan.")
-        # Kalau tidak — ini NOT FOUND, bukan SUCCESS. Jangan paksa.
-        answer_is_valid = (
-            bool(lightrag_answer)
-            and not _is_lightrag_negative_answer(lightrag_answer)
-        )
-        selected_candidate = None
-        ai_reason = "Tidak ada jawaban relevan dari LightRAG"
-        candidates_checked = len(all_candidates) if all_candidates else 1
-        relevance_duration = 0.0
-
-        if answer_is_valid:
-            selected_candidate = all_candidates[0] if all_candidates else {
-                "source": "lightrag",
-                "final_score": 0.0,
-                "content_for_check": "",
-                "answer_doc": "",
-                "question": "",
-                "note": "lightrag_engine",
-            }
-            # Jawaban final LightRAG mengalahkan teks chunk mentah.
-            selected_candidate["answer_doc"] = lightrag_answer
-            ai_reason = "Jawaban di-generate oleh LightRAG engine"
-            logger.info(
-                f"[ENGINE] LightRAG short-circuit: jawaban valid "
-                f"(len={len(lightrag_answer)} chars)"
-            )
-        else:
-            logger.warning(
-                f"[ENGINE] LightRAG answer invalid "
-                f"(negatif/kosong): '{lightrag_answer[:100]}' — "
-                "diputuskan NOT FOUND (bukan SUCCESS)"
-            )
-    else:
-        # 5. AI RELEVANCE CHECK (LEGACY / SHADOW)
-        selected_candidate, ai_reason, candidates_checked, relevance_duration = \
-            await check_relevance_by_mode(all_candidates, user_question, max_check=5)
-        
-        # 5.5 AI EXTRACTION FOR DOCUMENT & WEB
-        if selected_candidate:
-            source = selected_candidate.get("source", "unknown")
-            if source in ["document", "web"]:
+    # 5. AI RELEVANCE CHECK (RANKER v3)
+    # Berlaku untuk SEMUA engine (LightRAG maupun Legacy).
+    # Tidak ada lagi short-circuit yang membypass filter LLM kita.
+    selected_candidate, ai_reason, candidates_checked, relevance_duration = \
+        await check_relevance_by_mode(all_candidates, user_question, max_check=5)
+    
+    # 5.5 AI EXTRACTION FOR DOCUMENT & WEB
+    if selected_candidate:
+        source = selected_candidate.get("source", "unknown")
+        if source in ["document", "web"]:
                 logger.info(f"[AI-EXTRACT] Extracting answer from {source.upper()}...")
                 extract_start = time.time()
                 raw_text = selected_candidate.get("answer_doc", "")
