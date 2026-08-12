@@ -45,9 +45,6 @@ class LightRAGAdapterConfig:
     # === LightRAG Server Connection ===
     BASE_URL = _env("LIGHTRAG_BASE_URL", "http://127.0.0.1:9621")
     API_KEY = _env("LIGHTRAG_API_KEY", "")
-    # "yes" = LightRAG server memerlukan X-API-Key (fail-fast jika kosong).
-    # "no"  = server fully open, key opsional (dikirim hanya jika diisi).
-    API_KEY_REQUIRED = _env("LIGHTRAG_API_KEY_REQUIRED", "no", bool)
     WORKSPACE = _env("LIGHTRAG_WORKSPACE", "medan-main")
 
     # === Query ===

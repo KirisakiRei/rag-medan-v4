@@ -108,20 +108,8 @@ class LightRAGClient:
 
     @property
     def headers(self) -> Dict[str, str]:
-        """
-        Build request headers.
-
-        - API_KEY_REQUIRED=yes : key wajib dikirim, kosong = error jelas
-          (fail-fast, hindari 401 membingungkan + circuit breaker noise).
-        - API_KEY_REQUIRED=no  : server open, key opsional.
-        """
+        """Build request headers — menggunakan X-API-Key (sama dengan existing)."""
         h = {"Content-Type": "application/json"}
-        if adapter_config.API_KEY_REQUIRED and not adapter_config.API_KEY:
-            raise LightRAGConnectionError(
-                "LIGHTRAG_API_KEY_REQUIRED=yes tapi LIGHTRAG_API_KEY kosong. "
-                "Set LIGHTRAG_API_KEY di .env, atau ubah ke "
-                "LIGHTRAG_API_KEY_REQUIRED=no jika server open."
-            )
         if adapter_config.API_KEY:
             h["X-API-Key"] = adapter_config.API_KEY
         return h
