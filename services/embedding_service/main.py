@@ -223,7 +223,8 @@ async def openai_embed(request: OpenAIEmbedRequest):
     )
 
 
-def start_service():    """Start the service."""
+def start_service():
+    """Start the service."""
     uvicorn.run(
         "services.embedding_service.main:app",
         host="0.0.0.0",
