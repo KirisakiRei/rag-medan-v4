@@ -467,22 +467,6 @@ def run_ocr_subprocess(task_id: str, params: dict):
                 f"Dokumen berhasil disinkronkan. {n} chunk berhasil terindeks.",
                 total_chunks=n,
             )
-        elif pipeline_status == "duplicate":
-            _finalize_task(
-                task_id,
-                doc_id,
-                "completed",
-                "Dokumen sudah tersinkronkan sebelumnya (konten duplikat), tidak ada perubahan.",
-            )
-        elif pipeline_status == "reactivated":
-            n = total_chunks or 0
-            _finalize_task(
-                task_id,
-                doc_id,
-                "completed",
-                f"Dokumen berhasil diaktifkan kembali. {n} chunk telah dipulihkan.",
-                total_chunks=n,
-            )
         elif pipeline_status == "error":
             internal_detail = result.get("message", "")
             logger.error(f"[SUBPROCESS] Pipeline error untuk {task_id}: {internal_detail}")
@@ -574,7 +558,6 @@ async def sync_document(
         "file_url": file_path,
         "is_active": is_active,
         "lang": "id",
-        "collection_name": config.COLLECTION_DOCUMENT,
     }
 
     thread = threading.Thread(

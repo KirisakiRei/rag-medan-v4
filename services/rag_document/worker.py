@@ -15,9 +15,6 @@ from urllib.parse import unquote, urlparse
 
 import requests
 import urllib3
-from qdrant_client import QdrantClient
-from qdrant_client.http import models as qdrant_models
-from qdrant_client.http.models import Distance, PointStruct, VectorParams
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -25,11 +22,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 from config import config
 from shared.logging_config import setup_logging
-from shared.lightrag_sync import fire_lightrag_sync_document_sync, fire_lightrag_delete_sync
+from shared.lightrag_sync import fire_lightrag_sync_document_sync
 from shared.ocr_utils import (
     build_blocks_from_extracted_pages,
     calculate_content_hash,
-    calculate_file_hash,
     extract_blocks_from_file,
     extract_text_from_file,
 )
@@ -43,7 +39,6 @@ for handler in logger.handlers:
 
 _PROJECT_ROOT = Path(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 _PROGRESS_PREFIX = "__PROGRESS__"
-_DUMMY_VECTOR = [0.0]
 
 
 def emit_progress(stage: str, message: str, **extra) -> None:
@@ -183,56 +178,6 @@ def _resolve_file(
         raise IOError(f"Gagal mengunduh file: {url} - {e}")
 
 
-def check_dedup(qdrant: QdrantClient, hash_kind: str, hash_value: str) -> Optional[dict]:
-    """
-    Cek registry dedup (collection document_dedup) via retrieve-by-id.
-
-    Registry menyimpan 2 point per dokumen: "f:{file_hash}" dan "c:{content_hash}".
-    Jika point ada, file/konten yang sama pernah diproses → skip OCR.
-    """
-    try:
-        points = qdrant.retrieve(
-            collection_name=config.COLLECTION_DOCUMENT_DEDUP_REGISTRY,
-            ids=[f"{hash_kind}:{hash_value}"],
-            with_payload=True,
-            with_vectors=False,
-        )
-        return dict(points[0].payload) if points else None
-    except Exception as e:
-        logger.warning(f"[DEDUP] Gagal cek {hash_kind}: {e}")
-        return None
-
-
-def register_dedup(
-    qdrant: QdrantClient,
-    file_hash: str,
-    content_hash: str,
-    doc_id: str,
-) -> None:
-    """Tulis registry dedup setelah dokumen berhasil di-index ke LightRAG."""
-    if not file_hash and not content_hash:
-        return
-    now = datetime.utcnow().isoformat()
-    points = []
-    if file_hash:
-        points.append(PointStruct(
-            id=f"f:{file_hash}",
-            vector=_DUMMY_VECTOR,
-            payload={"file_hash": file_hash, "doc_id": doc_id, "registered_at": now},
-        ))
-    if content_hash:
-        points.append(PointStruct(
-            id=f"c:{content_hash}",
-            vector=_DUMMY_VECTOR,
-            payload={"content_hash": content_hash, "doc_id": doc_id, "registered_at": now},
-        ))
-    try:
-        qdrant.upsert(collection_name=config.COLLECTION_DOCUMENT_DEDUP_REGISTRY, points=points)
-        logger.info(f"[DEDUP] Registered {len(points)} hash(es) untuk doc_id={doc_id}")
-    except Exception as e:
-        logger.warning(f"[DEDUP] Gagal register doc_id={doc_id}: {e}")
-
-
 def _build_chunk_items(
     file_ext: str,
     blocks: List[dict],
@@ -285,10 +230,8 @@ def process_document(
     organization_id: Optional[str],
     filename: Optional[str],
     file_url: str,
-    collection_name: str,
     is_active: bool = True,
     lang: str = "id",
-    skip_dedup_check: bool = False,
 ) -> dict:
     logger.info(f"[WORKER] ========== START task={task_id} doc_id={doc_id} ==========")
 
@@ -328,23 +271,6 @@ def process_document(
 
         file_ext = os.path.splitext(local_file_path)[1].lower()
 
-        try:
-            file_hash = calculate_file_hash(local_file_path)
-            logger.info(f"[WORKER] file_hash={file_hash[:16]}...")
-        except Exception as e:
-            logger.warning(f"[WORKER] Gagal hitung file_hash: {e}")
-            file_hash = ""
-
-        progress_callback("dedup", "Menghubungkan ke Qdrant dan memeriksa duplikasi awal...")
-        qdrant = _connect_qdrant()
-        _ensure_collection(qdrant)
-
-        if not skip_dedup_check and file_hash:
-            dedup_point = check_dedup(qdrant, "f", file_hash)
-            if dedup_point:
-                logger.info("[WORKER] file_hash match - duplicate, skip OCR")
-                return {"status": "duplicate", "total_chunks": 0, "message": ""}
-
         progress_callback("extracting", "Mengekstrak teks dokumen...")
         extracted_pages = extract_text_from_file(
             local_file_path,
@@ -361,13 +287,6 @@ def process_document(
 
         logger.info(f"[WORKER] Ekstraksi selesai: {len(text)} karakter")
         content_hash = calculate_content_hash(text)
-
-        if not skip_dedup_check:
-            progress_callback("dedup", "Memeriksa duplikasi berdasarkan konten hasil ekstraksi...")
-            content_dedup = check_dedup(qdrant, "c", content_hash)
-            if content_dedup:
-                logger.info("[WORKER] content_hash match - duplicate")
-                return {"status": "duplicate", "total_chunks": 0, "message": ""}
 
         progress_callback("chunking", "Mengekstrak block terstruktur dokumen...")
         structured_blocks = _extract_structured_blocks_for_worker(
@@ -419,7 +338,6 @@ def process_document(
             is_active=is_active,
             organization_id=organization_id,
         )
-        register_dedup(qdrant, file_hash, content_hash, doc_id)
 
         return {"status": "ok", "total_chunks": total_chunks, "message": ""}
 
@@ -436,30 +354,6 @@ def process_document(
                 logger.warning(f"[WORKER] Gagal hapus temp file: {e}")
 
 
-def _connect_qdrant() -> QdrantClient:
-    if config.QDRANT_API_KEY:
-        return QdrantClient(
-            url=f"http://{config.QDRANT_HOST}:{config.QDRANT_PORT}",
-            api_key=config.QDRANT_API_KEY,
-        )
-    return QdrantClient(url=f"http://{config.QDRANT_HOST}:{config.QDRANT_PORT}")
-
-
-def _ensure_collection(qdrant: QdrantClient):
-    collection_name = config.COLLECTION_DOCUMENT_DEDUP_REGISTRY
-    collections = qdrant.get_collections()
-    existing = [c.name for c in collections.collections]
-    if collection_name not in existing:
-        logger.info(f"[WORKER] Membuat collection dedup: {collection_name}")
-        qdrant.create_collection(
-            collection_name=collection_name,
-            vectors_config=VectorParams(
-                size=1,
-                distance=Distance.COSINE,
-            ),
-        )
-
-
 def main():
     try:
         raw = sys.stdin.read()
@@ -474,10 +368,8 @@ def main():
     organization_id = params.get("organization_id")
     filename = params.get("filename")
     file_url = params.get("file_url", "")
-    collection_name = params.get("collection_name", config.COLLECTION_DOCUMENT)
     is_active = params.get("is_active", True)
     lang = params.get("lang", "id")
-    skip_dedup = params.get("skip_dedup_check", False)
 
     if not doc_id or not file_url:
         result = {"status": "error", "message": "Parameter doc_id dan file_url wajib diisi."}
@@ -490,10 +382,8 @@ def main():
         organization_id=organization_id,
         filename=filename,
         file_url=file_url,
-        collection_name=collection_name,
         is_active=is_active,
         lang=lang,
-        skip_dedup_check=skip_dedup,
     )
 
     print(json.dumps(result), flush=True)
