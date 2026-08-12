@@ -90,40 +90,63 @@ async def root():
 
 @app.get("/health")
 async def health_check():
-    """Health check - cek semua services."""
-    services_status = {}
-    
-    try:
-        text_health = await call_service(config.TEXT_SERVICE_URL, "/health", "GET", timeout=10.0)
-        services_status["text_service"] = text_health.get("status") == "healthy"
-    except:
-        services_status["text_service"] = False
-    
-    try:
-        doc_health = await call_service(config.DOCUMENT_SERVICE_URL, "/health", "GET", timeout=10.0)
-        services_status["document_service"] = doc_health.get("status") == "healthy"
-    except:
-        services_status["document_service"] = False
-    
-    try:
-        web_health = await call_service(config.WEB_SERVICE_URL, "/health", "GET", timeout=10.0)
-        services_status["web_service"] = web_health.get("status") == "healthy"
-    except:
-        services_status["web_service"] = False
-    
-    try:
-        usulan_health = await call_service(config.USULAN_SERVICE_URL, "/health", "GET", timeout=10.0)
-        services_status["usulan_service"] = usulan_health.get("status") == "healthy"
-    except:
-        services_status["usulan_service"] = False
-    
-    overall_status = all(services_status.values())
-    
+    """
+    Health check gabungan - cek semua services secara paralel.
+
+    Threshold:
+    - Core services (text, document, web, usulan) harus semua healthy.
+    - Embedding service hanya wajib healthy saat USE_SHARED_EMBEDDING=True
+      (mode local tidak bergantung padanya).
+    """
+    health_timeout = 5.0
+
+    async def _check(name: str, url: str) -> dict:
+        try:
+            detail = await call_service(url, "/health", "GET", timeout=health_timeout)
+            up = detail.get("status") == "healthy"
+            return {
+                "up": up,
+                "status": detail.get("status", "unknown"),
+                "detail": detail,
+            }
+        except Exception:
+            return {"up": False, "status": "unreachable", "detail": None}
+
+    targets = [
+        ("text_service", config.TEXT_SERVICE_URL),
+        ("document_service", config.DOCUMENT_SERVICE_URL),
+        ("web_service", config.WEB_SERVICE_URL),
+        ("usulan_service", config.USULAN_SERVICE_URL),
+        ("embedding_service", config.SHARED_EMBEDDING_URL),
+    ]
+
+    results = await asyncio.gather(*(_check(name, url) for name, url in targets))
+    components = dict(zip([t[0] for t in targets], results))
+
+    core_up = all(components[name]["up"] for name in [
+        "text_service", "document_service", "web_service", "usulan_service"
+    ])
+
+    embedding_required = config.USE_SHARED_EMBEDDING
+    embedding_up = components["embedding_service"]["up"]
+
+    if core_up and (not embedding_required or embedding_up):
+        status = "healthy"
+    elif core_up:
+        status = "degraded"
+    else:
+        status = "unhealthy"
+
     return {
-        "status": "healthy" if overall_status else "degraded",
+        "status": status,
         "service": "orchestrator",
         "mode": "parallel_search",
-        "components": services_status
+        "shared_embedding": embedding_required,
+        "components": {
+            name: {"up": info["up"], "status": info["status"]}
+            for name, info in components.items()
+        },
+        "details": components,
     }
 
 # ============== UNIFIED SEARCH ==============

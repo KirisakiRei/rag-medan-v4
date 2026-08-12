@@ -6,6 +6,70 @@ deployment.
 
 ---
 
+## [2026-08-09] - Optimasi P1 & P2 (RAM, Koneksi DB, Health, Dependensi)
+
+### P1: Gate Model Embedding Lokal (Hemat RAM Besar)
+
+- **Baru: `shared/bootstrap.py`** — `LazyModel` holder model embedding:
+  - Gate `USE_SHARED_EMBEDDING=True` (default): `get()` mengembalikan
+    `None` dan model lokal **tidak pernah dimuat**. Sebelumnya keempat
+    service tetap memuat SentenceTransformer (~500MB-1GB) padahal encoding
+    sudah didelegasikan ke embedding microservice.
+  - Mode `USE_SHARED_EMBEDDING=False`: lazy load + thundering herd
+    protection + idle unload (perilaku lama dipertahankan).
+  - `on_load` callback untuk wiring instance ke search/sync module.
+- **`services/rag_{text,usulan,document,web}/main.py`** — pindah ke
+  `LazyModel`, hapus duplikasi `get_model`/`_idle_unload_loop`/`init_qdrant`.
+
+### P1: MySQL Connection Pooling
+
+- **`shared/db.py`** — ganti koneksi baru per-call dengan
+  `MySQLConnectionPool` (size 5, `pool_reset_session=False`):
+  - `ping(reconnect=True)` saat checkout mencegah "server has gone away"
+    pada koneksi reuse.
+  - Fallback koneksi langsung jika pool habis/error (tidak ada request
+    yang gagal hanya karena pool exhaustion).
+
+### P1: Bootstrap Refactor (Deduplikasi)
+
+- `create_qdrant_client()`, `ensure_payload_index()`, `backfill_is_active()`
+  dipindah ke `shared/bootstrap.py` (sebelumnya duplikat identik di
+  rag_document & rag_web).
+
+### P2: Health Endpoint Gabungan (Orchestrator)
+
+- **`orchestrator/orchestrator.py`** `/health`:
+  - Cek **paralel** via `asyncio.gather` (sebelumnya 4x sequential, 10s
+    timeout tiap service → lambat).
+  - Tambah komponen `embedding_service`.
+  - Threshold: core (text/document/web/usulan) wajib healthy; embedding
+    service hanya wajib saat `USE_SHARED_EMBEDDING=True`.
+  - Status: `healthy` / `degraded` / `unhealthy` + detail per komponen.
+
+### P2: Rapi Requirements.txt
+
+- **Hapus (tak terpakai di kode aktif):** aiohttp, langchain,
+  langchain-text-splitters, nltk, langdetect, Sastrawi, rapidfuzz,
+  trafilatura, PyMySQL, lxml, tqdm, click, python-multipart, pdf2image.
+- **Tambah (dipakai tapi belum terdaftar):** `PyMuPDF` (fitz, dipakai
+  `pdf_layout_extractor`/`ocr_utils`), `openpyxl` (dipakai ekstraksi .xlsx).
+- Versi dilonggarkan ke `>=` (floor = versi teruji); paddlepaddle/paddleocr
+  tetap di-pin karena kombinasi versi sudah teruji.
+
+### P2: Deduplikasi Scraper/Init
+
+- Duplikasi `init_qdrant` + payload index + backfill antara rag_document
+  dan rag_web disatukan lewat `shared/bootstrap.py`.
+
+### Verifikasi
+
+- `py_compile` semua file berubah — OK.
+- Test suite: **49 passed** (termasuk `test_lazy_model_gate` baru untuk
+  gate shared embedding, dan `test_internal_auth`).
+- `import asyncio`/`gc`/`time` yang tak terpakai dibersihkan dari 4 service.
+
+---
+
 ## [2026-08-09] - Config: Ramping `.env` (Hapus Key Tuning Duplikat)
 
 ### Ringkasan

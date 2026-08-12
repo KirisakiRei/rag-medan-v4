@@ -2,55 +2,46 @@
 # RAG Medan v3 - Requirements
 # Python 3.10+ (tested on 3.10, 3.11, 3.12)
 # Install: pip install -r requirements.txt
+#
+# Versi longgar (>= floor) agar mudah di-upgrade. Pengecualian:
+# paddlepaddle/paddleocr di-pin karena kombinasi versi yang sudah
+# terbukti bekerja di lingkungan OCR local.
 # ============================================================
 
 # ============== CORE FRAMEWORK ==============
-fastapi==0.115.0
-uvicorn[standard]==0.32.0
-pydantic==2.10.3
-pydantic-settings==2.6.1
-python-multipart==0.0.20
-python-dotenv==1.0.1
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+pydantic>=2.10.3
+pydantic-settings>=2.6.1
+python-dotenv>=1.0.1
 
-# ============== HTTP & ASYNC ==============
-httpx==0.28.1
-aiohttp==3.11.11
-requests==2.32.3
+# ============== HTTP ==============
+httpx>=0.28.1
+requests>=2.32.3
 
 # ============== VECTOR DATABASE ==============
-qdrant-client==1.12.1
+qdrant-client>=1.12.1
 
 # ============== EMBEDDINGS ==============
-sentence-transformers==3.3.1
+sentence-transformers>=3.3.1
 torch>=2.0.0
 transformers>=4.36.0
 
 # ============== DATABASE ==============
-mysql-connector-python==9.1.0
-PyMySQL==1.1.1
+mysql-connector-python>=9.1.0
 
-# PaddlePaddle untuk OCR - gunakan versi stable terbaru
+# ============== OCR ==============
+# PaddlePaddle untuk OCR local - kombinasi versi ini sudah teruji
 paddlepaddle==3.2.2
 paddleocr==2.9.1
-pdf2image==1.17.0
+# PyMuPDF (fitz) untuk ekstraksi layout/teks PDF
+PyMuPDF>=1.28.0
+# openpyxl untuk dokumen spreadsheet (.xlsx)
+openpyxl>=3.1.0
 Pillow>=11.0.0
 
 # ============== WEB SCRAPING (untuk RAG Web) ==============
-beautifulsoup4==4.12.3
-lxml==5.3.0
-trafilatura==2.0.0
+beautifulsoup4>=4.12.3
 # Playwright untuk JavaScript rendering (SPA websites)
 # Setelah install, jalankan: playwright install chromium
 playwright>=1.40.0
-
-# ============== TEXT PROCESSING ==============
-nltk==3.9.1
-Sastrawi==1.0.1
-langdetect==1.0.9
-rapidfuzz==3.11.0
-langchain==0.3.13
-langchain-text-splitters==0.3.4
-
-# ============== UTILITIES ==============
-tqdm==4.67.1
-click==8.1.7

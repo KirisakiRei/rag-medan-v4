@@ -2,16 +2,12 @@
 import os
 import sys
 import uuid
-import gc
-import time
-import asyncio
 import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.responses import JSONResponse
 import uvicorn
-from sentence_transformers import SentenceTransformer
 from qdrant_client import AsyncQdrantClient
 from qdrant_client.http import models as qdrant_models
 from qdrant_client.http.models import Distance, VectorParams
@@ -21,6 +17,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 from config import config
 from shared.logging_config import setup_logging
 from shared.security import InternalAuthMiddleware
+from shared.bootstrap import (
+    LazyModel,
+    backfill_is_active,
+    create_qdrant_client,
+    ensure_payload_index,
+)
 
 from services.rag_web import search as search_module
 from services.rag_web import sync as sync_module
@@ -31,145 +33,32 @@ from services.rag_web.models import (
 
 logger = setup_logging("rag_web")
 
-_model: SentenceTransformer = None
-_model_lock = asyncio.Lock()
-_last_model_used: float = 0.0
 qdrant: AsyncQdrantClient = None
 
 
-async def _ensure_payload_index(collection_name: str, field_name: str, field_schema) -> None:
-    """Best-effort payload index creation."""
-    try:
-        await qdrant.create_payload_index(
-            collection_name=collection_name,
-            field_name=field_name,
-            field_schema=field_schema
-        )
-    except Exception as exc:
-        logger.debug(
-            f"Skip/create payload index failed for {collection_name}.{field_name}: {exc}"
-        )
+def _wire_model(model):
+    """Wire loaded local model into search/sync modules."""
+    search_module.set_instances(model, qdrant)
+    sync_module.set_instances(model, qdrant)
 
 
-async def _backfill_is_active(collection_name: str) -> None:
-    """Backfill missing is_active payload for legacy points."""
-    try:
-        offset = None
-        updated_active = 0
-        updated_inactive = 0
-        while True:
-            points, next_offset = await qdrant.scroll(
-                collection_name=collection_name,
-                limit=256,
-                offset=offset,
-                with_payload=True,
-                with_vectors=False,
-            )
-            if not points:
-                break
-
-            active_ids = []
-            inactive_ids = []
-            for point in points:
-                payload = dict(point.payload or {})
-                if "is_active" in payload:
-                    continue
-                if payload.get("is_deleted", False):
-                    inactive_ids.append(point.id)
-                else:
-                    active_ids.append(point.id)
-
-            if active_ids:
-                await qdrant.set_payload(
-                    collection_name=collection_name,
-                    payload={"is_active": True},
-                    points=active_ids,
-                )
-                updated_active += len(active_ids)
-            if inactive_ids:
-                await qdrant.set_payload(
-                    collection_name=collection_name,
-                    payload={"is_active": False},
-                    points=inactive_ids,
-                )
-                updated_inactive += len(inactive_ids)
-
-            if next_offset is None:
-                break
-            offset = next_offset
-
-        if updated_active or updated_inactive:
-            logger.info(
-                f"Backfilled is_active on {collection_name}: "
-                f"active={updated_active}, inactive={updated_inactive}"
-            )
-    except Exception as exc:
-        logger.warning(f"Backfill is_active skipped for {collection_name}: {exc}")
+model_holder = LazyModel(
+    config.EMBEDDING_MODEL_PATH,
+    on_load=_wire_model,
+    name="embedding",
+)
 
 
-async def get_model() -> SentenceTransformer:
-    """Lazy load embedding model with thundering herd protection."""
-    global _model, _last_model_used
-    
-    if _model is not None:
-        _last_model_used = time.time()
-        return _model
-    
-    async with _model_lock:
-        if _model is not None:
-            _last_model_used = time.time()
-            return _model
-        
-        logger.info("Loading embedding model (lazy)...")
-        _model = SentenceTransformer(config.EMBEDDING_MODEL_PATH)
-        _last_model_used = time.time()
-        logger.info(f"Model loaded: {config.EMBEDDING_MODEL_PATH}")
-        
-        search_module.set_instances(_model, qdrant)
-        sync_module.set_instances(_model, qdrant)
-        
-        return _model
-
-
-async def _idle_unload_loop():
-    """Background task: unload model after IDLE_TIMEOUT seconds of inactivity."""
-    global _model, _last_model_used
-    while True:
-        await asyncio.sleep(300)
-        if _model is not None and _last_model_used > 0:
-            idle_seconds = time.time() - _last_model_used
-            if idle_seconds > config.MODEL_IDLE_TIMEOUT:
-                async with _model_lock:
-                    if _model is not None and (time.time() - _last_model_used) > config.MODEL_IDLE_TIMEOUT:
-                        logger.info(f"Model idle for {idle_seconds:.0f}s > {config.MODEL_IDLE_TIMEOUT}s, unloading...")
-                        del _model
-                        _model = None
-                        gc.collect()
-                        logger.info("Model unloaded, RAM freed")
+async def get_model():
+    """Return local model (None saat shared embedding aktif)."""
+    return await model_holder.get()
 
 
 async def init_qdrant():
     """Initialize Qdrant connection."""
     global qdrant
-    
-    if config.QDRANT_API_KEY:
-        qdrant = AsyncQdrantClient(
-            host=config.QDRANT_HOST,
-            port=config.QDRANT_PORT,
-            api_key=config.QDRANT_API_KEY,
-            grpc_port=None,
-            prefer_grpc=False,
-            timeout=60
-        )
-    else:
-        qdrant = AsyncQdrantClient(
-            host=config.QDRANT_HOST,
-            port=config.QDRANT_PORT,
-            grpc_port=None,
-            prefer_grpc=False,
-            timeout=60
-        )
-    
+    qdrant = create_qdrant_client()
+
     try:
         collections = await qdrant.get_collections()
         collection_names = [c.name for c in collections.collections]
@@ -194,64 +83,74 @@ async def init_qdrant():
                 )
             )
 
-        await _ensure_payload_index(
+        await ensure_payload_index(
+            qdrant,
             config.COLLECTION_WEB,
             "web_bank_id",
             qdrant_models.PayloadSchemaType.KEYWORD
         )
-        await _ensure_payload_index(
+        await ensure_payload_index(
+            qdrant,
             config.COLLECTION_WEB,
             "link_id",
             qdrant_models.PayloadSchemaType.KEYWORD
         )
-        await _ensure_payload_index(
+        await ensure_payload_index(
+            qdrant,
             config.COLLECTION_WEB,
             "opd_id",
             qdrant_models.PayloadSchemaType.KEYWORD
         )
-        await _ensure_payload_index(
+        await ensure_payload_index(
+            qdrant,
             config.COLLECTION_WEB,
             "is_deleted",
             qdrant_models.PayloadSchemaType.BOOL
         )
-        await _ensure_payload_index(
+        await ensure_payload_index(
+            qdrant,
             config.COLLECTION_WEB,
             "is_active",
             qdrant_models.PayloadSchemaType.BOOL
         )
-        await _ensure_payload_index(
+        await ensure_payload_index(
+            qdrant,
             config.COLLECTION_WEB,
             "chunk_level",
             qdrant_models.PayloadSchemaType.KEYWORD
         )
-        await _ensure_payload_index(
+        await ensure_payload_index(
+            qdrant,
             config.COLLECTION_WEB,
             "parent_chunk_id",
             qdrant_models.PayloadSchemaType.KEYWORD
         )
-        await _ensure_payload_index(
+        await ensure_payload_index(
+            qdrant,
             config.COLLECTION_WEB_STATE,
             "web_bank_id",
             qdrant_models.PayloadSchemaType.KEYWORD
         )
-        await _ensure_payload_index(
+        await ensure_payload_index(
+            qdrant,
             config.COLLECTION_WEB_STATE,
             "is_active",
             qdrant_models.PayloadSchemaType.BOOL
         )
-        await _ensure_payload_index(
+        await ensure_payload_index(
+            qdrant,
             config.COLLECTION_WEB_STATE,
             "last_scrape_status",
             qdrant_models.PayloadSchemaType.KEYWORD
         )
-        await _backfill_is_active(config.COLLECTION_WEB)
+        await backfill_is_active(qdrant, config.COLLECTION_WEB)
     except Exception as e:
         logger.error(f"Qdrant init error: {e}")
-    
+
     # Wire Qdrant-dependent modules immediately so non-embedding endpoints
     # such as delete/content/update-state can work before lazy model loading.
-    search_module.set_instances(_model, qdrant)
-    sync_module.set_instances(_model, qdrant)
+    search_module.set_instances(model_holder.model, qdrant)
+    sync_module.set_instances(model_holder.model, qdrant)
 
     logger.info(f"Qdrant connected: {config.QDRANT_HOST}:{config.QDRANT_PORT}")
 
@@ -260,13 +159,17 @@ async def init_qdrant():
 async def lifespan(app: FastAPI):
     """Application lifespan - model loaded lazily on first request."""
     await init_qdrant()
-    
-    asyncio.create_task(_idle_unload_loop())
-    
-    logger.info(f"RAG Web Service Started on port {config.WEB_SERVICE_PORT} (model: lazy load)")
-    
+
+    model_holder.start_idle_unload()
+
+    logger.info(
+        f"RAG Web Service Started on port {config.WEB_SERVICE_PORT} "
+        f"(model: shared={config.USE_SHARED_EMBEDDING}, lazy local fallback)"
+    )
+
     yield
-    
+
+    await model_holder.stop_idle_unload()
     logger.info("RAG Web Service Shutting down...")
 
     try:
@@ -302,7 +205,7 @@ async def health_check():
     return {
         "status": status,
         "service": "rag_web",
-        "model_loaded": _model is not None,
+        "model_loaded": model_holder.loaded,
         "components": {
             "qdrant": qdrant_ok
         }
