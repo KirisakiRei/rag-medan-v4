@@ -34,6 +34,7 @@ from services.lightrag_adapter.errors import (
     LightRAGConnectionError,
     LightRAGSearchError,
 )
+from services.lightrag_adapter.stats import stats
 
 logger = logging.getLogger("lightrag_adapter.search")
 
@@ -151,6 +152,7 @@ async def search(
             f"[LR-SEARCH] Found {len(canonical_contexts)} contexts, "
             f"{len(references)} unique sources in {total_sec:.2f}s"
         )
+        stats.record_query(total_sec)
 
         return {
             "status": "success",
@@ -167,6 +169,7 @@ async def search(
 
     except LightRAGConnectionError as e:
         total_sec = time.time() - search_start
+        stats.record_query_error()
         logger.error(f"[LR-SEARCH] Connection error: {e}")
         return {
             "status": "error",
@@ -180,6 +183,7 @@ async def search(
 
     except LightRAGSearchError as e:
         total_sec = time.time() - search_start
+        stats.record_query_error()
         logger.error(f"[LR-SEARCH] Search error: {e}")
         return {
             "status": "error",
@@ -193,6 +197,7 @@ async def search(
 
     except Exception as e:
         total_sec = time.time() - search_start
+        stats.record_query_error()
         logger.error(f"[LR-SEARCH] Unexpected error: {e}", exc_info=True)
         return {
             "status": "error",

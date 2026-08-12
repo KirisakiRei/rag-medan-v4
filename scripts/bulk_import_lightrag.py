@@ -220,8 +220,10 @@ def build_text_documents(
 ) -> List[Dict[str, str]]:
     """
     Build dokumen dari knowledge_bank (FAQ).
-    Catatan: knowledge_bank hanya berisi pertanyaan, tidak ada jawaban.
-    Fungsi ini disediakan untuk kelengkapan, tapi hasilnya terbatas.
+
+    Sesuai desain v4: hanya PERTANYAAN yang di-index ke LightRAG
+    (question match). Jawaban tidak pernah disimpan — jawaban dinamis
+    diambil via answer_id (= question_rag_id) dari MySQL eksternal.
 
     Returns:
         List of {"text": ..., "description": ...}
@@ -229,14 +231,25 @@ def build_text_documents(
     documents = []
     for point in points:
         payload = point.get("payload", {})
-        question = payload.get("question", "") or payload.get("question_rag_name", "")
+
+        # Skip inactive atau deleted
+        if payload.get("is_deleted", False):
+            continue
+        if not payload.get("is_active", True):
+            continue
+
+        question = payload.get("question_rag_name", "") or payload.get("question", "")
         if not question:
             continue
 
-        question_id = payload.get("question_id", "")
+        question_id = payload.get("question_rag_id", "") or payload.get("question_id", "")
+        if not question_id:
+            continue
         category_id = payload.get("category_id", "")
 
         document_text = f"Pertanyaan: {question}"
+        if category_id:
+            document_text += f"\nKategori: {category_id}"
         description = f"text:{question_id}"
 
         documents.append({

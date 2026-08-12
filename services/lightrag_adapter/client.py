@@ -260,6 +260,7 @@ class LightRAGClient:
             "mode": mode,
             "top_k": top_k,
             "include_references": include_references,
+            "enable_rerank": adapter_config.RERANK_ENABLED,
         }
         return await self._request("POST", "/query", json_data=payload)
 
@@ -283,6 +284,7 @@ class LightRAGClient:
             "top_k": top_k,
             "response_type": "multiple",
             "include_references": True,
+            "enable_rerank": adapter_config.RERANK_ENABLED,
         }
         return await self._request("POST", "/query", json_data=payload)
 

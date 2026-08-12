@@ -21,6 +21,7 @@ from services.lightrag_adapter.source_mapper import (
     normalize_document_content,
     normalize_web_content,
 )
+from services.lightrag_adapter.stats import stats
 
 logger = logging.getLogger("lightrag_adapter.sync")
 
@@ -72,6 +73,7 @@ async def sync_text(
 
     result = await _index_document(doc_id, normalized, "text", source_id)
     result["content_hash"] = content_hash
+    stats.record_sync("text", result.get("status") == "success")
     return result
 
 
@@ -122,6 +124,7 @@ async def sync_document(
 
     result = await _index_document(doc_id, normalized, "document", source_id)
     result["content_hash"] = content_hash
+    stats.record_sync("document", result.get("status") == "success")
     return result
 
 
@@ -169,6 +172,7 @@ async def sync_web(
 
     result = await _index_document(doc_id, normalized, "web", source_id)
     result["content_hash"] = content_hash
+    stats.record_sync("web", result.get("status") == "success")
     return result
 
 
@@ -191,7 +195,9 @@ async def delete_source(
         SyncResponse dict.
     """
     doc_id = make_document_id(knowledge_base_id, source_type, source_id)
-    return await _delete_source(doc_id, source_type, source_id)
+    result = await _delete_source(doc_id, source_type, source_id)
+    stats.record_delete(source_type)
+    return result
 
 
 # ============== INTERNAL HELPERS ==============

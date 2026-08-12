@@ -7,6 +7,7 @@ dan dependency-nya (LightRAG Server).
 import logging
 
 from services.lightrag_adapter.client import lightrag_client
+from services.lightrag_adapter.stats import stats
 
 logger = logging.getLogger("lightrag_adapter.health")
 
@@ -46,4 +47,5 @@ async def check_health() -> dict:
             "lightrag_server": lightrag_healthy,
             "circuit_breaker": circuit_state,
         },
+        "stats": stats.snapshot(),
     }
