@@ -56,7 +56,26 @@ class Scraper:
             return await self._scrape_with_playwright(url, wait_selector)
 
         logger.info(f"[SCRAPER] Mode: httpx — {url}")
-        result = await self._scrape_with_httpx(url)
+        try:
+            result = await self._scrape_with_httpx(url)
+        except WebScrapeError as exc:
+            # Auto mode: HTTP clients sering ditolak 401/403/429 oleh WAF/CDN,
+            # sementara browser sungguhan tetap diizinkan. Coba Playwright
+            # sekali sebelum menyatakan pipeline gagal.
+            browser_fallback_statuses = {"HTTP 401", "HTTP 403", "HTTP 429"}
+            should_try_browser = (
+                use_js_renderer is None
+                and exc.code == "http_status_error"
+                and any(status in exc.detail for status in browser_fallback_statuses)
+            )
+            if not should_try_browser:
+                raise
+
+            logger.warning(
+                f"[SCRAPER] httpx ditolak ({exc.detail}); "
+                f"fallback ke Playwright — {url}"
+            )
+            return await self._scrape_with_playwright(url, wait_selector)
 
         if use_js_renderer is False:
             return result

@@ -297,16 +297,17 @@ class LightRAGClient:
     async def insert_text(
         self,
         text: str,
-        description: Optional[str] = None,
+        file_source: str,
     ) -> Dict[str, Any]:
         """
         Insert text document ke LightRAG index.
 
         POST /documents/text
         """
-        payload: Dict[str, Any] = {"text": text}
-        if description:
-            payload["description"] = description
+        payload: Dict[str, Any] = {
+            "text": text,
+            "file_source": file_source,
+        }
         return await self._request("POST", "/documents/text", json_data=payload)
 
     async def insert_texts_batch(
@@ -328,7 +329,19 @@ class LightRAGClient:
 
         DELETE /documents/{document_id}
         """
-        return await self._request("DELETE", f"/documents/{document_id}")
+        return await self._request(
+            "DELETE",
+            "/documents/delete_document",
+            json_data={
+                "doc_ids": [document_id],
+                "delete_file": False,
+                "delete_llm_cache": False,
+            },
+        )
+
+    async def get_track_status(self, track_id: str) -> Dict[str, Any]:
+        """Get final/background ingestion status for a LightRAG track ID."""
+        return await self._request("GET", f"/documents/track_status/{track_id}")
 
     async def get_documents_paginated(
         self,

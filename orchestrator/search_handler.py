@@ -64,7 +64,6 @@ def _infer_source_type(ctx: Dict[str, Any]) -> str:
     source_id = str(ctx.get("source_id") or "")
     source_uri = str(ctx.get("source_uri") or "")
     title = str(ctx.get("title") or "")
-    content = str(ctx.get("content") or "")[:2000]
 
     # 1. source_id berformat "web:<id>" / "document:<id>" / "text:<id>"
     for prefix, stype in (("web:", "web"), ("document:", "document"), ("text:", "text")):
@@ -79,15 +78,16 @@ def _infer_source_type(ctx: Dict[str, Any]) -> str:
     if source_uri.startswith("http") or "web://" in source_uri:
         return "web"
 
-    # 3. title/content mengandung URL -> web
-    if re.search(r"https?://", title) or re.search(r"https?://", content):
-        return "web"
-
-    # 4. title/content mengandung ekstensi file dokumen -> document
+    # 3. Ekstensi filename adalah bukti document. Jangan infer web dari URL
+    # dalam body karena dokumen PDF biasa dapat memuat tautan.
     if re.search(r"\.(pdf|docx?|xlsx?|pptx?|txt|jpg|png)$", title, re.I):
         return "document"
 
-    # 5. Default: text
+    # 4. URL pada title dapat menjadi fallback web yang terbatas.
+    if re.search(r"^https?://", title):
+        return "web"
+
+    # 5. Default generic question/text.
     return "text"
 
 

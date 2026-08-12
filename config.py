@@ -137,6 +137,9 @@ class Config:
     RATE_LIMIT_DELAY = _env("RATE_LIMIT_DELAY", 2.0, float)
     # Max retry attempts untuk webhook callback
     WEBHOOK_RETRY_ATTEMPTS = _env("WEBHOOK_RETRY_ATTEMPTS", 3, int)
+    # Verify TLS certificate pada callback WA Manajemen. Default aman=true.
+    # Set false hanya sementara jika sertifikat endpoint callback expired.
+    WEBHOOK_SSL_VERIFY = _env("WEBHOOK_SSL_VERIFY", "true", bool)
     
     # Webhook Configuration (shared: document dan web scraping service)
     # Backward-compatible aliases:
@@ -198,6 +201,8 @@ class Config:
     LIGHTRAG_INDEX_DOCUMENT = _env("LIGHTRAG_INDEX_DOCUMENT", "true", bool)
     LIGHTRAG_INDEX_WEB = _env("LIGHTRAG_INDEX_WEB", "true", bool)
     LIGHTRAG_TIMEOUT_SEC = _env("LIGHTRAG_TIMEOUT_SEC", 120, int)
+    LIGHTRAG_INDEX_TIMEOUT_SEC = _env("LIGHTRAG_INDEX_TIMEOUT_SEC", 600, int)
+    LIGHTRAG_INDEX_POLL_INTERVAL_SEC = _env("LIGHTRAG_INDEX_POLL_INTERVAL_SEC", 2.0, float)
     LIGHTRAG_MAX_RETRIES = _env("LIGHTRAG_MAX_RETRIES", 3, int)
 
 

@@ -11,7 +11,10 @@ Bertanggung jawab:
 Setiap sync operation bersifat idempotent — content_hash check
 dilakukan di level pemanggil (source processor) sebelum memanggil adapter.
 """
+import asyncio
+import hashlib
 import logging
+import time
 from typing import Dict, Any
 
 from services.lightrag_adapter.client import lightrag_client
@@ -22,6 +25,7 @@ from services.lightrag_adapter.source_mapper import (
     normalize_web_content,
 )
 from services.lightrag_adapter.stats import stats
+from services.lightrag_adapter.config import adapter_config
 
 logger = logging.getLogger("lightrag_adapter.sync")
 
@@ -226,16 +230,37 @@ async def _index_document(
     )
 
     try:
+        source_descriptor = f"{source_type}:{source_id}"
+        existing = await _find_document_by_source(source_descriptor)
+        if existing:
+            await _delete_actual_document(
+                str(existing.get("id") or _actual_document_id(source_descriptor)),
+                source_descriptor,
+            )
         result = await lightrag_client.insert_text(
             text=content,
-            description=f"{source_type}:{source_id}",
+            file_source=source_descriptor,
         )
-        logger.info(f"[LR-SYNC] Indexed {source_type}:{source_id} successfully")
+        track_id = str(result.get("track_id") or "").strip()
+        if result.get("status") != "success" or not track_id:
+            raise RuntimeError(
+                f"LightRAG tidak mengonfirmasi enqueue: {result}"
+            )
+
+        tracked = await _wait_until_indexed(track_id, source_descriptor)
+        actual_doc_id = tracked.get("id")
+        logger.info(
+            f"[LR-SYNC] Indexed {source_descriptor} successfully "
+            f"(doc_id={actual_doc_id}, track_id={track_id})"
+        )
         return {
             "status": "success",
             "source_id": source_id,
             "source_type": source_type,
-            "lightrag_document_id": doc_id,
+            "lightrag_document_id": actual_doc_id,
+            "logical_document_id": doc_id,
+            "file_source": source_descriptor,
+            "track_id": track_id,
             "message": "Indexed successfully",
         }
 
@@ -245,9 +270,91 @@ async def _index_document(
             "status": "error",
             "source_id": source_id,
             "source_type": source_type,
-            "lightrag_document_id": doc_id,
+            "lightrag_document_id": None,
+            "logical_document_id": doc_id,
             "message": str(e),
         }
+
+
+def _actual_document_id(file_source: str) -> str:
+    """Mirror LightRAG's stable doc ID algorithm for known file_source."""
+    return "doc-" + hashlib.md5(file_source.encode("utf-8")).hexdigest()
+
+
+async def _find_document_by_source(file_source: str) -> Dict[str, Any] | None:
+    """Find an exact source in LightRAG's paginated document registry."""
+    page = 1
+    while True:
+        result = await lightrag_client.get_documents_paginated(page=page, page_size=100)
+        for document in result.get("documents") or []:
+            if str(document.get("file_path") or "").strip() == file_source:
+                return document
+        pagination = result.get("pagination") or {}
+        if not pagination.get("has_next"):
+            return None
+        page += 1
+
+
+async def _delete_actual_document(actual_doc_id: str, file_source: str) -> None:
+    """Start deletion and wait until the exact source disappears."""
+    deadline = time.monotonic() + adapter_config.INDEX_TIMEOUT_SEC
+    while time.monotonic() < deadline:
+        result = await lightrag_client.delete_document(actual_doc_id)
+        status = str(result.get("status") or "").lower()
+        if status == "deletion_started":
+            break
+        if status == "busy":
+            await asyncio.sleep(adapter_config.INDEX_POLL_INTERVAL_SEC)
+            continue
+        raise RuntimeError(f"LightRAG menolak delete {file_source}: {result}")
+    else:
+        raise TimeoutError(f"Timeout memulai delete LightRAG untuk {file_source}")
+
+    while time.monotonic() < deadline:
+        if await _find_document_by_source(file_source) is None:
+            return
+        await asyncio.sleep(adapter_config.INDEX_POLL_INTERVAL_SEC)
+    raise TimeoutError(f"Timeout menunggu delete LightRAG untuk {file_source}")
+
+
+async def _wait_until_indexed(track_id: str, expected_file_source: str) -> Dict[str, Any]:
+    """Poll LightRAG until the enqueued source reaches a terminal status."""
+    deadline = time.monotonic() + adapter_config.INDEX_TIMEOUT_SEC
+    terminal_success = {"processed", "success", "completed"}
+    terminal_failure = {"failed", "error", "cancelled", "canceled"}
+
+    while time.monotonic() < deadline:
+        result = await lightrag_client.get_track_status(track_id)
+        documents = result.get("documents") or []
+        if documents:
+            failures = []
+            all_done = True
+            for document in documents:
+                status = str(document.get("status") or "").lower()
+                if status in terminal_failure:
+                    failures.append(document.get("error_msg") or status)
+                elif status not in terminal_success:
+                    all_done = False
+            if failures:
+                raise RuntimeError(
+                    f"LightRAG indexing gagal untuk {expected_file_source}: "
+                    + "; ".join(str(item) for item in failures)
+                )
+            if all_done:
+                matching = next(
+                    (
+                        doc for doc in documents
+                        if str(doc.get("file_path") or "").strip() == expected_file_source
+                    ),
+                    documents[0],
+                )
+                return matching
+        await asyncio.sleep(adapter_config.INDEX_POLL_INTERVAL_SEC)
+
+    raise TimeoutError(
+        f"LightRAG indexing timeout untuk {expected_file_source} "
+        f"(track_id={track_id})"
+    )
 
 
 async def _delete_source(
@@ -266,16 +373,24 @@ async def _delete_source(
     Returns:
         SyncResponse dict.
     """
-    logger.info(f"[LR-SYNC] Deleting {source_type}:{source_id} (doc_id={doc_id})")
+    source_descriptor = f"{source_type}:{source_id}"
+    logger.info(f"[LR-SYNC] Deleting {source_descriptor} (logical_id={doc_id})")
 
     try:
-        await lightrag_client.delete_document(doc_id)
-        logger.info(f"[LR-SYNC] Deleted {source_type}:{source_id}")
+        existing = await _find_document_by_source(source_descriptor)
+        actual_doc_id = str(
+            (existing or {}).get("id") or _actual_document_id(source_descriptor)
+        )
+        if existing:
+            await _delete_actual_document(actual_doc_id, source_descriptor)
+        logger.info(f"[LR-SYNC] Deleted {source_descriptor}")
         return {
             "status": "success",
             "source_id": source_id,
             "source_type": source_type,
-            "lightrag_document_id": doc_id,
+            "lightrag_document_id": actual_doc_id,
+            "logical_document_id": doc_id,
+            "file_source": source_descriptor,
             "message": "Deleted from LightRAG",
         }
 
@@ -285,6 +400,6 @@ async def _delete_source(
             "status": "error",
             "source_id": source_id,
             "source_type": source_type,
-            "lightrag_document_id": doc_id,
+            "lightrag_document_id": _actual_document_id(source_descriptor),
             "message": str(e),
         }

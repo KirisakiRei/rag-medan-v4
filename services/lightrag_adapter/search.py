@@ -116,6 +116,7 @@ async def search(
                     # Jangan pakai doc_descriptor sebagai title —
                     # "web:<id>" bukan judul, hanya identifier internal.
                     "title": ref.get("title") or "",
+                    "reference_id": ref.get("reference_id") or "",
                     "score": ref.get("score"),
                 })
 

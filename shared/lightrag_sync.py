@@ -28,7 +28,7 @@ Usage di setiap service:
 import asyncio
 import logging
 import threading
-from typing import Optional
+from typing import Optional, Dict, Any
 
 import httpx
 
@@ -60,6 +60,40 @@ def _should_sync() -> bool:
     """Check apakah LightRAG sync perlu dijalankan."""
     engine = config.RAG_SEARCH_ENGINE.lower()
     return engine in ("lightrag", "shadow")
+
+
+def _validate_adapter_response(response: httpx.Response, source_label: str) -> Dict[str, Any]:
+    """Validate both HTTP and application-level adapter status."""
+    response.raise_for_status()
+    result = response.json()
+    if result.get("status") not in ("success", "skipped"):
+        raise RuntimeError(
+            f"LightRAG adapter gagal untuk {source_label}: "
+            f"{result.get('message') or result.get('error') or result}"
+        )
+    return result
+
+
+async def sync_lightrag_text(**kwargs) -> Dict[str, Any]:
+    """Synchronously await confirmed text ingestion through the adapter."""
+    if not _should_sync():
+        raise RuntimeError("LightRAG sync nonaktif; RAG_SEARCH_ENGINE harus lightrag atau shadow")
+    response = await _get_client().post(
+        "/internal/sync/text",
+        json=kwargs,
+        timeout=config.LIGHTRAG_INDEX_TIMEOUT_SEC + 30,
+    )
+    return _validate_adapter_response(response, f"text:{kwargs.get('source_id')}")
+
+
+async def delete_lightrag_source(source_type: str, source_id: str) -> Dict[str, Any]:
+    """Synchronously await adapter acknowledgement for source deletion."""
+    if not _should_sync():
+        raise RuntimeError("LightRAG sync nonaktif; RAG_SEARCH_ENGINE harus lightrag atau shadow")
+    response = await _get_client().delete(
+        f"/internal/source/{source_type}/{source_id}"
+    )
+    return _validate_adapter_response(response, f"{source_type}:{source_id}")
 
 
 # ============== FIRE-AND-FORGET ENTRY POINTS ==============
@@ -318,29 +352,23 @@ def fire_lightrag_sync_document_sync(
     content_hash: str = "",
     is_active: bool = True,
     organization_id: Optional[str] = None,
-) -> None:
+) -> Dict[str, Any]:
     """
-    Fire-and-forget (threading): sync dokumen ke LightRAG Adapter.
-
-    Versi synchronous untuk dipakai di document worker (sync context).
-    Menjalankan HTTP call di background thread.
+    Blocking confirmed sync untuk document worker subprocess.
     """
     if not _should_sync():
-        return
+        raise RuntimeError("LightRAG sync nonaktif; RAG_SEARCH_ENGINE harus lightrag atau shadow")
 
-    thread = threading.Thread(
-        target=_sync_document_thread,
-        args=(source_id, title, normalized_content, file_name,
-              content_hash, is_active, organization_id),
-        daemon=True,
+    return _sync_document_thread(
+        source_id, title, normalized_content, file_name,
+        content_hash, is_active, organization_id,
     )
-    thread.start()
 
 
 def fire_lightrag_delete_sync(
     source_type: str,
     source_id: str,
-) -> None:
+) -> Dict[str, Any]:
     """
     Fire-and-forget (threading): hapus source dari LightRAG.
 
@@ -382,20 +410,17 @@ def _sync_document_thread(
             "is_active": is_active,
             "organization_id": organization_id,
         }
-        with httpx.Client(timeout=30.0) as client:
+        with httpx.Client(timeout=config.LIGHTRAG_INDEX_TIMEOUT_SEC + 30) as client:
             response = client.post(url, json=payload, headers=headers)
-        if response.status_code == 200:
-            logger.debug(f"[LR-SYNC] Document synced: {source_id}")
-        else:
-            logger.warning(
-                f"[LR-SYNC] Document sync failed for {source_id}: "
-                f"HTTP {response.status_code}"
-            )
+        result = _validate_adapter_response(response, f"document:{source_id}")
+        logger.info(f"[LR-SYNC] Document confirmed indexed: {source_id}")
+        return result
     except Exception as exc:
-        logger.warning(
+        logger.error(
             f"[LR-SYNC] Document sync error for {source_id}: "
             f"{type(exc).__name__}: {exc}"
         )
+        raise
 
 
 def _delete_thread(

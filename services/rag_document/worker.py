@@ -8,6 +8,7 @@ import os
 import re
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, List, Optional, Tuple
@@ -321,25 +322,50 @@ def process_document(
         all_chunk_texts = [chunk_item.text for chunk_item in child_chunks]
 
         progress_callback(
+            "indexing",
+            f"Mengirim {total_chunks} chunk ke LightRAG dan menunggu indexing selesai...",
+            total_chunks=total_chunks,
+        )
+
+        full_text = "\n\n".join(all_chunk_texts)
+        sync_kwargs = {
+            "source_id": doc_id,
+            "title": document_filename or doc_id,
+            "normalized_content": full_text,
+            "file_name": document_filename,
+            "content_hash": content_hash,
+            "is_active": is_active,
+            "organization_id": organization_id,
+        }
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            sync_future = executor.submit(
+                fire_lightrag_sync_document_sync,
+                **sync_kwargs,
+            )
+            while True:
+                try:
+                    lightrag_result = sync_future.result(timeout=30)
+                    break
+                except FutureTimeoutError:
+                    progress_callback(
+                        "indexing",
+                        "LightRAG masih memproses dokumen, menunggu konfirmasi...",
+                        total_chunks=total_chunks,
+                    )
+
+        progress_callback(
             "completed",
-            f"Pipeline selesai. {total_chunks} chunk siap di-index ke LightRAG.",
+            f"Pipeline selesai. {total_chunks} chunk berhasil di-index ke LightRAG.",
             total_chunks=total_chunks,
         )
         logger.info(f"[WORKER] ========== DONE task={task_id} chunks={total_chunks} ==========")
 
-        # Fire-and-forget: sync ke LightRAG (background thread)
-        full_text = "\n\n".join(all_chunk_texts)
-        fire_lightrag_sync_document_sync(
-            source_id=doc_id,
-            title=document_filename or doc_id,
-            normalized_content=full_text,
-            file_name=document_filename,
-            content_hash=content_hash,
-            is_active=is_active,
-            organization_id=organization_id,
-        )
-
-        return {"status": "ok", "total_chunks": total_chunks, "message": ""}
+        return {
+            "status": "ok",
+            "total_chunks": total_chunks,
+            "lightrag_document_id": lightrag_result.get("lightrag_document_id"),
+            "message": "",
+        }
 
     except Exception as e:
         logger.exception(f"[WORKER] Unexpected error task={task_id}: {e}")

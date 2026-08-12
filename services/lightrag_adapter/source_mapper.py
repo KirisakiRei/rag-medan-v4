@@ -63,6 +63,7 @@ def parse_document_id(document_id: str) -> Tuple[str, str, str]:
     Raises:
         SourceMappingError: Jika format tidak valid.
     """
+    document_id = str(document_id or "").strip()
     parts = document_id.split(":")
     if len(parts) < 4 or parts[0] != "kb":
         raise SourceMappingError(f"Cannot parse document ID: {document_id!r}")
@@ -70,6 +71,8 @@ def parse_document_id(document_id: str) -> Tuple[str, str, str]:
     source_type = parts[2]
     # source_id bisa mengandung ':' (misal URL), jadi join sisa parts
     source_id = ":".join(parts[3:])
+    if source_type not in ("text", "document", "web") or not source_id:
+        raise SourceMappingError(f"Cannot parse document ID: {document_id!r}")
     return kb_id, source_type, source_id
 
 

@@ -75,7 +75,10 @@ async def send_callback(
 
     for attempt in range(1, max_retries + 1):
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
+            async with httpx.AsyncClient(
+                timeout=30.0,
+                verify=app_config.WEBHOOK_SSL_VERIFY,
+            ) as client:
                 response = await client.put(target_url, json=payload, headers=headers)
                 response.raise_for_status()
 

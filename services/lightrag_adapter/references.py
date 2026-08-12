@@ -14,6 +14,7 @@ Alur:
   Canonical ContextItem (source_type, source_id, source_uri, reference_id)
 """
 import logging
+import re
 from typing import List, Dict, Any
 
 from services.lightrag_adapter.source_mapper import (
@@ -35,21 +36,34 @@ def _parse_source_descriptor(doc_descriptor: str) -> tuple[str, str]:
     Returns:
         (source_type, source_id); keduanya "" jika tidak bisa di-parse.
     """
+    doc_descriptor = str(doc_descriptor or "").strip()
     if not doc_descriptor:
         return "", ""
 
     parts = doc_descriptor.split(":")
-    if len(parts) >= 4 and parts[0] == "kb":
+    valid_types = {"text", "document", "web"}
+    if len(parts) >= 4 and parts[0] == "kb" and parts[2] in valid_types:
         source_type = parts[2]
         source_id = ":".join(parts[3:])
-        return source_type, source_id
+        return (source_type, source_id) if source_id else ("", "")
 
     if len(parts) >= 2 and parts[0] in ("text", "document", "web"):
         source_type = parts[0]
         source_id = ":".join(parts[1:])
-        return source_type, source_id
+        return (source_type, source_id) if source_id else ("", "")
 
     return "", ""
+
+
+def _extract_ingestion_metadata(content: str) -> Dict[str, str]:
+    """Read only trusted normalized header fields produced by our adapter."""
+    header = str(content or "").split("\n\n", 1)[0]
+    metadata: Dict[str, str] = {}
+    for key in ("Title", "File", "URL"):
+        match = re.search(rf"(?m)^{key}:\s*(.+?)\s*$", header)
+        if match:
+            metadata[key.lower()] = match.group(1).strip()
+    return metadata
 
 
 def map_lightrag_context_to_canonical(
@@ -99,16 +113,22 @@ def map_lightrag_context_to_canonical(
                 source_type = "unknown"
                 source_id = doc_id
 
-        # Build logical source URI
-        source_uri = make_source_uri(source_type, source_id)
+        metadata = _extract_ingestion_metadata(content)
+        title = str(ctx.get("title") or metadata.get("title") or "")
+        source_uri = make_source_uri(
+            source_type,
+            source_id,
+            file_name=metadata.get("file", ""),
+            url=metadata.get("url", ""),
+        )
 
         canonical.append({
             "content": content,
             "source_type": source_type,
             "source_id": source_id,
-            "title": ctx.get("title", ""),
+            "title": title,
             "source_uri": source_uri,
-            "reference_id": str(idx + 1),
+            "reference_id": str(ctx.get("reference_id") or idx + 1),
             "score": score,
         })
 

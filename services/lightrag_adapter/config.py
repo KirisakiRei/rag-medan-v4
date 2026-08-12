@@ -62,6 +62,8 @@ class LightRAGAdapterConfig:
     TIMEOUT_SEC = _env("LIGHTRAG_TIMEOUT_SEC", 120.0, float)
     MAX_RETRIES = _env("LIGHTRAG_MAX_RETRIES", 3, int)
     HEALTH_CHECK_INTERVAL = _env("LIGHTRAG_HEALTH_INTERVAL", 10, int)
+    INDEX_TIMEOUT_SEC = _env("LIGHTRAG_INDEX_TIMEOUT_SEC", 600.0, float)
+    INDEX_POLL_INTERVAL_SEC = _env("LIGHTRAG_INDEX_POLL_INTERVAL_SEC", 2.0, float)
 
     # === Legacy Fallback URLs (reuse dari app_config) ===
     LEGACY_TEXT_URL = app_config.TEXT_SERVICE_URL
