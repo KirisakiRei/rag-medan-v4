@@ -96,9 +96,9 @@ async def search_web_bank(
     
     start_qdrant = time.time()
     try:
-        results = await qdrant.search(
+        _qp_resp = await qdrant.query_points(
             collection_name=config.COLLECTION_WEB,
-            query_vector=query_embedding,
+            query=query_embedding,
             query_filter=qdrant_models.Filter(
                 must=[
                     qdrant_models.FieldCondition(
@@ -118,6 +118,7 @@ async def search_web_bank(
             limit=limit,
             score_threshold=score_threshold
         )
+        results = _qp_resp.points if hasattr(_qp_resp, "points") else _qp_resp
     except Exception as e:
         logger.error(f"Qdrant search error: {e}")
         return _build_error_response(
@@ -267,9 +268,9 @@ async def search_web_unified(
         embedding_duration = time.time() - embedding_start
 
         qdrant_start = time.time()
-        results = await qdrant.search(
+        _qp_resp = await qdrant.query_points(
             collection_name=config.COLLECTION_WEB,
-            query_vector=query_embedding,
+            query=query_embedding,
             query_filter=qdrant_models.Filter(
                 must=[
                     qdrant_models.FieldCondition(
@@ -289,6 +290,7 @@ async def search_web_unified(
             limit=top_k * 2,  # Fetch lebih banyak untuk filtering
             score_threshold=score_threshold
         )
+        results = _qp_resp.points if hasattr(_qp_resp, "points") else _qp_resp
         qdrant_duration = time.time() - qdrant_start
 
         if not results:

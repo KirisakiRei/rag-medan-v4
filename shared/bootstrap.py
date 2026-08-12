@@ -25,11 +25,10 @@ logger = logging.getLogger("shared.bootstrap")
 
 def create_qdrant_client() -> AsyncQdrantClient:
     """Create AsyncQdrantClient with memory-conscious settings (HTTP only)."""
+    api_key = config.QDRANT_API_KEY or None
     return AsyncQdrantClient(
-        host=config.QDRANT_HOST,
-        port=config.QDRANT_PORT,
-        api_key=config.QDRANT_API_KEY,
-        grpc_port=None,
+        url=f"http://{config.QDRANT_HOST}:{config.QDRANT_PORT}",
+        api_key=api_key,
         prefer_grpc=False,
         timeout=60,
     )

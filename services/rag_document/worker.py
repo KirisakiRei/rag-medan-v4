@@ -685,11 +685,10 @@ def process_document(
 def _connect_qdrant() -> QdrantClient:
     if config.QDRANT_API_KEY:
         return QdrantClient(
-            host=config.QDRANT_HOST,
-            port=config.QDRANT_PORT,
+            url=f"http://{config.QDRANT_HOST}:{config.QDRANT_PORT}",
             api_key=config.QDRANT_API_KEY,
         )
-    return QdrantClient(host=config.QDRANT_HOST, port=config.QDRANT_PORT)
+    return QdrantClient(url=f"http://{config.QDRANT_HOST}:{config.QDRANT_PORT}")
 
 
 def _ensure_collection(qdrant: QdrantClient, collection_name: str):

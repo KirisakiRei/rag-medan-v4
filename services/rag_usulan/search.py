@@ -59,11 +59,12 @@ async def search_usulan_bank(
     embedding_duration = time.time() - embedding_start
 
     qdrant_start = time.time()
-    qdrant_results = await qdrant.search(
+    _qp_response = await qdrant.query_points(
         collection_name=config.COLLECTION_USULAN,
-        query_vector=query_vector,
+        query=query_vector,
         limit=limit
     )
+    qdrant_results = _qp_response.points if hasattr(_qp_response, "points") else _qp_response
     qdrant_duration = time.time() - qdrant_start
 
     # Log kandidat hasil

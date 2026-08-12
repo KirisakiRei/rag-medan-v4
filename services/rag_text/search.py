@@ -105,12 +105,13 @@ async def search_knowledge_bank(
         )
     ]) if category_id else None
 
-    qdrant_results = await qdrant.search(
+    _qp_response = await qdrant.query_points(
         collection_name=config.COLLECTION_TEXT,
-        query_vector=query_vector,
+        query=query_vector,
         limit=limit,
         query_filter=category_filter
     )
+    qdrant_results = _qp_response.points if hasattr(_qp_response, "points") else _qp_response
     qdrant_duration = time.time() - qdrant_start
 
     scored_results = []
