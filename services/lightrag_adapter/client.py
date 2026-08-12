@@ -352,7 +352,7 @@ class LightRAGClient:
             "/documents/text": "post",
             "/documents/delete_document": "delete",
             "/documents/track_status/{track_id}": "get",
-            "/documents/paginated": "get",
+            "/documents/paginated": "post",
             "/query": "post",
         }
         missing = [
@@ -383,11 +383,17 @@ class LightRAGClient:
         """
         Get paginated document list.
 
-        GET /documents/paginated
+        POST /documents/paginated
         """
         return await self._request(
-            "GET",
-            f"/documents/paginated?page={page}&page_size={page_size}",
+            "POST",
+            "/documents/paginated",
+            json_data={
+                "page": page,
+                "page_size": page_size,
+                "sort_field": "updated_at",
+                "sort_direction": "desc",
+            },
         )
 
     async def check_health(self) -> bool:

@@ -54,6 +54,23 @@ class LightRAGClientContractTests(unittest.TestCase):
 
         self.assertEqual(client._request.await_count, 1)
 
+    def test_paginated_listing_uses_modern_post_contract(self):
+        client = LightRAGClient()
+        client._request = AsyncMock(return_value={"documents": []})
+
+        asyncio.run(client.get_documents_paginated(page=2, page_size=100))
+
+        client._request.assert_awaited_once_with(
+            "POST",
+            "/documents/paginated",
+            json_data={
+                "page": 2,
+                "page_size": 100,
+                "sort_field": "updated_at",
+                "sort_direction": "desc",
+            },
+        )
+
     def test_startup_contract_requires_modern_delete_endpoint(self):
         client = LightRAGClient()
         request = httpx.Request("GET", "http://lightrag/openapi.json")
@@ -66,7 +83,7 @@ class LightRAGClientContractTests(unittest.TestCase):
                 "paths": {
                     "/documents/text": {"post": {}},
                     "/documents/track_status/{track_id}": {"get": {}},
-                    "/documents/paginated": {"get": {}},
+                    "/documents/paginated": {"post": {}},
                     "/query": {"post": {}},
                 },
             },
@@ -88,7 +105,7 @@ class LightRAGClientContractTests(unittest.TestCase):
                     "/documents/text": {"post": {}},
                     "/documents/delete_document": {"delete": {}},
                     "/documents/track_status/{track_id}": {"get": {}},
-                    "/documents/paginated": {"get": {}},
+                    "/documents/paginated": {"post": {}},
                     "/query": {"post": {}},
                 },
             },
