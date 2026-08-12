@@ -10,6 +10,7 @@ from qdrant_client.http import models as qdrant_models
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from config import config
+from shared.lightrag_sync import fire_lightrag_delete
 
 logger = logging.getLogger("rag_document.delete")
 
@@ -67,6 +68,10 @@ async def soft_delete_document(doc_id: str) -> Dict[str, Any]:
         )
 
         logger.info(f"[SOFT-DELETE] Soft deleted {len(all_point_ids)} chunks untuk doc_id={doc_id}")
+
+        # Fire-and-forget: hapus dari LightRAG
+        fire_lightrag_delete(source_type="document", source_id=doc_id)
+
         return {"status": "deleted", "deleted": len(all_point_ids)}
 
     except Exception as e:
@@ -115,6 +120,10 @@ async def hard_delete_document(doc_id: str) -> Dict[str, Any]:
         )
 
         logger.info(f"[HARD-DELETE] Deleted {len(all_point_ids)} chunks untuk doc_id={doc_id}")
+
+        # Fire-and-forget: hapus dari LightRAG
+        fire_lightrag_delete(source_type="document", source_id=doc_id)
+
         return {"status": "deleted", "deleted": len(all_point_ids)}
 
     except Exception as e:

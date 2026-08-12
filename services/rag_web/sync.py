@@ -17,6 +17,7 @@ from qdrant_client.http.models import PointStruct
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from config import config
+from shared.lightrag_sync import fire_lightrag_sync_web, fire_lightrag_delete
 from services.rag_document.chunker import ChunkItem
 from services.rag_web.scraper import scraper, WebScrapeError
 from services.rag_web.cleaner import cleaner
@@ -314,6 +315,20 @@ async def store_chunks(
         f"[SYNC] Stored {len(parent_chunks)} parent + {len(child_chunks)} child points "
         f"for web_bank_id={web_bank_id}"
     )
+
+    # Fire-and-forget: sync ke LightRAG
+    clean_content = "\n\n".join(
+        chunk.text for chunk in child_chunks if chunk.text and len(chunk.text) >= 20
+    )
+    fire_lightrag_sync_web(
+        source_id=web_bank_id,
+        url=url,
+        title=title or name,
+        clean_content=clean_content,
+        content_hash=content_hash,
+        is_active=is_active,
+    )
+
     return point_ids
 
 
@@ -416,6 +431,10 @@ async def soft_delete_by_web_bank_id(web_bank_id: str) -> int:
         points=point_ids,
     )
     logger.info(f"[SYNC] Soft deleted {len(point_ids)} chunks for web_bank_id={web_bank_id}")
+
+    # Fire-and-forget: hapus dari LightRAG
+    fire_lightrag_delete(source_type="web", source_id=web_bank_id)
+
     return len(point_ids)
 
 
@@ -438,6 +457,10 @@ async def hard_delete_by_web_bank_id(web_bank_id: str) -> int:
         points_selector=qdrant_models.PointIdsList(points=point_ids),
     )
     logger.info(f"[SYNC] Hard deleted {len(point_ids)} chunks for web_bank_id={web_bank_id}")
+
+    # Fire-and-forget: hapus dari LightRAG
+    fire_lightrag_delete(source_type="web", source_id=web_bank_id)
+
     return len(point_ids)
 
 

@@ -26,6 +26,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 from config import config
 from shared.logging_config import setup_logging
+from shared.lightrag_sync import fire_lightrag_sync_document_sync, fire_lightrag_delete_sync
 from shared.ocr_utils import (
     build_blocks_from_extracted_pages,
     calculate_content_hash,
@@ -568,6 +569,7 @@ def process_document(
 
         now = datetime.utcnow().isoformat()
         points = []
+        all_chunk_texts = []  # Kumpulkan teks untuk LightRAG sync
 
         points_by_id = {}
 
@@ -610,6 +612,7 @@ def process_document(
             points_by_id[parent_item.chunk_id] = parent_point
 
         for i, (chunk_item, embedding) in enumerate(zip(child_chunks, embeddings)):
+            all_chunk_texts.append(chunk_item.text)
             payload = {
                 "mysql_id": doc_id,
                 "organization_id": organization_id,
@@ -667,6 +670,19 @@ def process_document(
 
         progress_callback("completed", f"Pipeline selesai. {total_chunks} chunk berhasil terindeks.", total_chunks=total_chunks)
         logger.info(f"[WORKER] ========== DONE task={task_id} chunks={total_chunks} ==========")
+
+        # Fire-and-forget: sync ke LightRAG (background thread)
+        full_text = "\n\n".join(all_chunk_texts)
+        fire_lightrag_sync_document_sync(
+            source_id=doc_id,
+            title=document_filename or doc_id,
+            normalized_content=full_text,
+            file_name=document_filename,
+            content_hash=content_hash,
+            is_active=is_active,
+            organization_id=organization_id,
+        )
+
         return {"status": "ok", "total_chunks": total_chunks, "message": ""}
 
     except Exception as e:

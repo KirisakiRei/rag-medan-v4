@@ -12,6 +12,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 from config import config
 from shared.utils import encode_texts
+from shared.lightrag_sync import fire_lightrag_sync_text, fire_lightrag_delete
 
 logger = logging.getLogger("rag_text.sync")
 
@@ -66,7 +67,20 @@ async def sync_data(action: str, content: Any) -> Dict[str, Any]:
             )
             
             logger.info(f"[SYNC-DATA] Sinkronisasi {len(points)} data ke Knowledge Bank berhasil")
-            
+
+            # Fire-and-forget: sync ke LightRAG
+            for item in content:
+                fire_lightrag_sync_text(
+                    source_id=str(item["question_rag_id"]),
+                    title=item.get("question", ""),
+                    content="",
+                    content_hash="",
+                    is_active=True,
+                    category=item.get("category_id"),
+                    question=item.get("question"),
+                    answer=None,
+                )
+
             return {
                 "status": "success",
                 "message": f"Sinkronisasi {len(points)} data berhasil",
@@ -91,7 +105,19 @@ async def sync_data(action: str, content: Any) -> Dict[str, Any]:
                 }]
             )
             logger.info(f"[SYNC-DATA] Data berhasil ditambahkan ke Knowledge Bank: ID={point_id}")
-            
+
+            # Fire-and-forget: sync ke LightRAG
+            fire_lightrag_sync_text(
+                source_id=point_id,
+                title=content.get("question", ""),
+                content="",
+                content_hash="",
+                is_active=True,
+                category=content.get("category_id"),
+                question=content.get("question"),
+                answer=None,
+            )
+
             return {"status": "success", "message": "Data berhasil ditambahkan", "id": point_id}
         
         elif action == "update":
@@ -112,7 +138,19 @@ async def sync_data(action: str, content: Any) -> Dict[str, Any]:
                 }]
             )
             logger.info(f"[SYNC-DATA] Data berhasil Diperbarui di Knowledge Bank: ID={point_id}")
-            
+
+            # Fire-and-forget: sync ke LightRAG
+            fire_lightrag_sync_text(
+                source_id=point_id,
+                title=content.get("question", ""),
+                content="",
+                content_hash="",
+                is_active=True,
+                category=content.get("category_id"),
+                question=content.get("question"),
+                answer=None,
+            )
+
             return {"status": "success", "message": "Data berhasil diperbarui"}
         
         elif action == "delete":
@@ -123,7 +161,10 @@ async def sync_data(action: str, content: Any) -> Dict[str, Any]:
                 wait=True
             )
             logger.info(f"[SYNC-DATA] Data dihapus : ID={point_id}")
-            
+
+            # Fire-and-forget: hapus dari LightRAG
+            fire_lightrag_delete(source_type="text", source_id=point_id)
+
             return {"status": "success", "message": "Data berhasil dihapus"}
         
         else:
