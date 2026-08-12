@@ -59,6 +59,13 @@ class InternalAuthMiddleware(BaseHTTPMiddleware):
 
         expected = config.INTERNAL_API_KEY
         provided = request.headers.get("X-API-Key", "")
+
+        # Fallback: support Authorization: Bearer <key> (untuk client OpenAI-compatible)
+        if not provided:
+            auth_header = request.headers.get("Authorization", "")
+            if auth_header.startswith("Bearer "):
+                provided = auth_header[len("Bearer "):].strip()
+
         if (
             not expected
             or not provided
