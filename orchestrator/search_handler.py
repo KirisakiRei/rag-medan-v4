@@ -28,6 +28,37 @@ logger = logging.getLogger(__name__)
 
 # ============== LIGHTRAG MAIN MODE ==============
 
+_LIGHTRAG_NEGATIVE_PATTERNS = (
+    r"tidak terdapat (?:di )?dalam konteks",
+    r"tidak ditemukan (?:di )?dalam konteks",
+    r"tidak ada (?:informasi|data|jawaban)",
+    r"tidak (?:dapat|bisa) (?:menjawab|memberikan|memberi)",
+    r"tidak memiliki (?:informasi|data)",
+    r"tidak menemukan (?:informasi|data|jawaban|hal)",
+    r"no relevant context found",
+)
+
+
+def _is_lightrag_negative_answer(answer: str) -> bool:
+    """
+    Deteksi jawaban LightRAG yang menyatakan "tidak tahu".
+
+    LightRAG yang tidak menemukan konteks sering menghasilkan jawaban
+    berbentuk "Maaf, informasi X tidak terdapat di dalam konteks yang
+    disediakan." — teks non-kosong tapi isinya NOT FOUND.
+
+    Jawaban sah yang berisi "tidak ada" (mis. "Tidak ada persyaratan
+    khusus...") TIDAK terdeteksi — pola disusun spesifik ke kalimat
+    "tidak tahu", bukan sekadar kata "tidak".
+    """
+    if not answer:
+        return True
+    lowered = answer.lower().strip()
+    if lowered.startswith("maaf"):
+        return True
+    return any(re.search(p, lowered) for p in _LIGHTRAG_NEGATIVE_PATTERNS)
+
+
 def _infer_source_type(ctx: Dict[str, Any]) -> str:
     """Fallback: infer source_type saat LightRAG tidak mengirim metadata."""
     source_id = str(ctx.get("source_id") or "")
@@ -736,10 +767,14 @@ async def unified_search(
         #
         # VALIDASI KETAT: hanya anggap "ketemu" jika:
         #   a) Ada jawaban generate non-kosong dari LightRAG, DAN
-        #   b) Bukan placeholder "No relevant context found for the query."
+        #   b) Bukan placeholder "No relevant context found for the query.", DAN
+        #   c) Bukan kalimat "tidak tahu" (mis. "Maaf, ... tidak terdapat
+        #      di dalam konteks yang disediakan.")
         # Kalau tidak — ini NOT FOUND, bukan SUCCESS. Jangan paksa.
-        _NO_CONTEXT_MARKER = "No relevant context found for the query"
-        answer_is_valid = bool(lightrag_answer) and lightrag_answer != _NO_CONTEXT_MARKER
+        answer_is_valid = (
+            bool(lightrag_answer)
+            and not _is_lightrag_negative_answer(lightrag_answer)
+        )
         selected_candidate = None
         ai_reason = "Tidak ada jawaban relevan dari LightRAG"
         candidates_checked = len(all_candidates) if all_candidates else 1
@@ -763,7 +798,8 @@ async def unified_search(
             )
         else:
             logger.warning(
-                "[ENGINE] LightRAG answer kosong/placeholder — "
+                f"[ENGINE] LightRAG answer invalid "
+                f"(negatif/kosong): '{lightrag_answer[:100]}' — "
                 "diputuskan NOT FOUND (bukan SUCCESS)"
             )
     else:

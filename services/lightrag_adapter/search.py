@@ -113,7 +113,9 @@ async def search(
                 raw_contexts.append({
                     "content": chunk_text,
                     "doc_id": doc_descriptor,
-                    "title": ref.get("title") or doc_descriptor,
+                    # Jangan pakai doc_descriptor sebagai title —
+                    # "web:<id>" bukan judul, hanya identifier internal.
+                    "title": ref.get("title") or "",
                     "score": ref.get("score"),
                 })
 
