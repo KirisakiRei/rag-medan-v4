@@ -156,6 +156,10 @@ class Config:
     # Fail-closed: jika kosong, semua request selain allowlist ditolak 401.
     # Tidak mengubah struktur payload; key hanya dikirim via header.
     INTERNAL_API_KEY = _env("INTERNAL_API_KEY", "")
+    # "yes" = semua request non-allowlist wajib X-API-Key (fail-closed, default).
+    # "no"  = validasi key nonaktif; request tanpa key diterima.
+    #         Digunakan saat tim luar (WA bot/dashboard) mengakses tanpa key.
+    INTERNAL_API_KEY_REQUIRED = _env("INTERNAL_API_KEY_REQUIRED", "yes", bool)
 
     # ============== OPTIMIZATION CONFIGS ==============
     

@@ -8,7 +8,11 @@ berjalan di level header HTTP.
 Aturan:
 - Key dibaca dari config.INTERNAL_API_KEY per-request (bisa dirotasi
   tanpa restart, dan mudah di-test).
-- Fail-closed: jika key kosong, semua request non-allowlist ditolak 401.
+- Fail-closed (INTERNAL_API_KEY_REQUIRED=yes): jika key kosong, semua
+  request non-allowlist ditolak 401.
+- INTERNAL_API_KEY_REQUIRED=no: validasi key dinonaktifkan — request
+  tanpa key diterima. Berguna saat tim luar (WA bot/dashboard) mengakses
+  endpoint seperti /api/search tanpa membawa key.
 - Allowlist: `/`, `/health`, dan path dokumentasi FastAPI tetap terbuka.
 - Metode OPTIONS dibiarkan lewat agar CORS preflight tetap berfungsi.
 - Perbandingan key memakai secrets.compare_digest (constant-time).
@@ -41,7 +45,13 @@ class InternalAuthMiddleware(BaseHTTPMiddleware):
 
     def __init__(self, app):
         super().__init__(app)
-        if not config.INTERNAL_API_KEY:
+        if not config.INTERNAL_API_KEY_REQUIRED:
+            logger.warning(
+                "INTERNAL_API_KEY_REQUIRED=no — validasi API key NONAKTIF. "
+                "Semua request non-allowlist diterima tanpa key. "
+                "Aktifkan kembali (yes) untuk produksi publik."
+            )
+        elif not config.INTERNAL_API_KEY:
             logger.warning(
                 "INTERNAL_API_KEY kosong! Fail-closed aktif: "
                 "semua request non-allowlist akan ditolak (HTTP 401). "
@@ -55,6 +65,10 @@ class InternalAuthMiddleware(BaseHTTPMiddleware):
 
         # Endpoint publik / monitoring / dokumentasi tetap terbuka.
         if _is_allowed_path(request.url.path):
+            return await call_next(request)
+
+        # Mode nonaktif: terima semua request tanpa validasi key.
+        if not config.INTERNAL_API_KEY_REQUIRED:
             return await call_next(request)
 
         expected = config.INTERNAL_API_KEY
