@@ -41,6 +41,64 @@ class LightRAGClientContractTests(unittest.TestCase):
             },
         )
 
+    def test_delete_does_not_fallback_to_legacy(self):
+        from services.lightrag_adapter.errors import LightRAGSearchError
+
+        client = LightRAGClient()
+        client._request = AsyncMock(side_effect=LightRAGSearchError(
+            'LightRAG returned 405: {"detail":"Method Not Allowed"}'
+        ))
+
+        with self.assertRaises(LightRAGSearchError):
+            asyncio.run(client.delete_document("doc-abc"))
+
+        self.assertEqual(client._request.await_count, 1)
+
+    def test_startup_contract_requires_modern_delete_endpoint(self):
+        client = LightRAGClient()
+        request = httpx.Request("GET", "http://lightrag/openapi.json")
+        client._client = AsyncMock()
+        client._client.get = AsyncMock(return_value=httpx.Response(
+            200,
+            request=request,
+            json={
+                "info": {"version": "legacy"},
+                "paths": {
+                    "/documents/text": {"post": {}},
+                    "/documents/track_status/{track_id}": {"get": {}},
+                    "/documents/paginated": {"get": {}},
+                    "/query": {"post": {}},
+                },
+            },
+        ))
+
+        with self.assertRaisesRegex(RuntimeError, "DELETE /documents/delete_document"):
+            asyncio.run(client.verify_modern_api_contract())
+
+    def test_startup_contract_accepts_required_modern_endpoints(self):
+        client = LightRAGClient()
+        request = httpx.Request("GET", "http://lightrag/openapi.json")
+        client._client = AsyncMock()
+        client._client.get = AsyncMock(return_value=httpx.Response(
+            200,
+            request=request,
+            json={
+                "info": {"version": "0329"},
+                "paths": {
+                    "/documents/text": {"post": {}},
+                    "/documents/delete_document": {"delete": {}},
+                    "/documents/track_status/{track_id}": {"get": {}},
+                    "/documents/paginated": {"get": {}},
+                    "/query": {"post": {}},
+                },
+            },
+        ))
+
+        result = asyncio.run(client.verify_modern_api_contract())
+
+        self.assertTrue(result["compatible"])
+        self.assertEqual(result["api_version"], "0329")
+
 
 class ConfirmedIndexTests(unittest.TestCase):
     def test_index_waits_for_processed_track(self):

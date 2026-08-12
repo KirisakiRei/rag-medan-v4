@@ -169,11 +169,14 @@ module.exports = {
     // ============== LIGHTRAG SERVER (v4) ==============
     {
       name: "lightrag-server",
-      script: path.join(__dirname, '.venv', isWindows ? 'Scripts' : 'bin', isWindows ? 'lightrag-server.exe' : 'lightrag-server'),
-      args: "",
+      // Jalankan module dari source bundled/pinned. Jangan gunakan console
+      // script .venv/bin/lightrag-server yang dapat menunjuk package versi lama.
+      script: pythonPath,
+      args: "-m lightrag.api.lightrag_server",
       cwd: path.join(__dirname, 'lightrag'),
       interpreter: "none",
       env: {
+        PYTHONPATH: path.join(__dirname, 'lightrag'),
         PYTHONMALLOC: "malloc",
         MALLOC_TRIM_THRESHOLD_: "100000"
       },

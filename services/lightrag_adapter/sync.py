@@ -301,7 +301,7 @@ async def _delete_actual_document(actual_doc_id: str, file_source: str) -> None:
     while time.monotonic() < deadline:
         result = await lightrag_client.delete_document(actual_doc_id)
         status = str(result.get("status") or "").lower()
-        if status == "deletion_started":
+        if status in {"deletion_started", "success", "deleted"}:
             break
         if status == "busy":
             await asyncio.sleep(adapter_config.INDEX_POLL_INTERVAL_SEC)

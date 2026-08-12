@@ -49,6 +49,7 @@ logger = setup_logging("lightrag_adapter")
 async def lifespan(app: FastAPI):
     """Initialize LightRAG client on startup, cleanup on shutdown."""
     await lightrag_client.start()
+    contract = await lightrag_client.verify_modern_api_contract()
 
     logger.info(f"LightRAG Adapter Started on port {adapter_config.PORT}")
     logger.info(f"  LightRAG Server : {adapter_config.BASE_URL}")
@@ -58,6 +59,10 @@ async def lifespan(app: FastAPI):
     logger.info(f"  Index Text      : {adapter_config.INDEX_TEXT}")
     logger.info(f"  Index Document  : {adapter_config.INDEX_DOCUMENT}")
     logger.info(f"  Index Web       : {adapter_config.INDEX_WEB}")
+    logger.info(
+        f"  API Contract    : modern/compatible "
+        f"(version={contract['api_version']})"
+    )
 
     yield
 

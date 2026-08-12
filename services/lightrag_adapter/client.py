@@ -325,9 +325,9 @@ class LightRAGClient:
 
     async def delete_document(self, document_id: str) -> Dict[str, Any]:
         """
-        Delete document dari LightRAG index.
+        Delete document menggunakan kontrak LightRAG modern.
 
-        DELETE /documents/{document_id}
+        DELETE /documents/delete_document + JSON body.
         """
         return await self._request(
             "DELETE",
@@ -338,6 +338,38 @@ class LightRAGClient:
                 "delete_llm_cache": False,
             },
         )
+
+    async def verify_modern_api_contract(self) -> Dict[str, Any]:
+        """Fail fast when the deployed LightRAG API is older than our contract."""
+        if self._client is None:
+            raise LightRAGConnectionError("LightRAG HTTP client belum diinisialisasi")
+
+        response = await self._client.get("/openapi.json", timeout=10.0)
+        response.raise_for_status()
+        schema = response.json()
+        paths = schema.get("paths") or {}
+        required = {
+            "/documents/text": "post",
+            "/documents/delete_document": "delete",
+            "/documents/track_status/{track_id}": "get",
+            "/documents/paginated": "get",
+            "/query": "post",
+        }
+        missing = [
+            f"{method.upper()} {path}"
+            for path, method in required.items()
+            if method not in (paths.get(path) or {})
+        ]
+        if missing:
+            raise RuntimeError(
+                "LightRAG Server tidak kompatibel dengan API modern yang diwajibkan: "
+                + ", ".join(missing)
+            )
+        return {
+            "compatible": True,
+            "required_endpoints": len(required),
+            "api_version": (schema.get("info") or {}).get("version", "unknown"),
+        }
 
     async def get_track_status(self, track_id: str) -> Dict[str, Any]:
         """Get final/background ingestion status for a LightRAG track ID."""
