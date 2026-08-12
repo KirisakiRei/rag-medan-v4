@@ -35,7 +35,7 @@ def _get_gemini_client() -> httpx.AsyncClient:
     if _gemini_client is None or _gemini_client.is_closed:
         _gemini_client = httpx.AsyncClient(
             limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
-            timeout=httpx.Timeout(config.LLM_TIMEOUT, connect=10.0)
+            timeout=httpx.Timeout(config.LLM_TIMEOUT, connect=30.0)
         )
     return _gemini_client
 
