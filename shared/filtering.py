@@ -197,7 +197,7 @@ async def call_filter_llm(
             return content.strip()
             
         except Exception as e:
-            logger.error(f"[ROUTER] Error calling API: {e}")
+            logger.error(f"[ROUTER] Error calling API: {type(e).__name__}: {e}", exc_info=True)
             logger.warning("[ROUTER] Falling back to Gemini...")
             return await _call_gemini_llm(system_prompt, user_message, temperature, max_tokens)
 
