@@ -30,6 +30,9 @@ def create_qdrant_client() -> AsyncQdrantClient:
         url=f"http://{config.QDRANT_HOST}:{config.QDRANT_PORT}",
         api_key=api_key,
         prefer_grpc=False,
+        # Klien (1.19) lebih baru dari server (1.15). Skip version check —
+        # API yang dipakai (query_points/retrieve/scroll) kompatibel.
+        check_compatibility=False,
         timeout=60,
     )
 
