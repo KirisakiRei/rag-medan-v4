@@ -20,6 +20,7 @@ def _load_search_handler():
     utils.clean_location_terms = lambda value: value
     utils.detect_category = lambda value: None
     service_client = types.ModuleType("orchestrator.service_client")
+    service_client.call_service = None
     service_client.call_service_safe = None
     aggregation = types.ModuleType("orchestrator.aggregation")
     aggregation.aggregate_and_sort_candidates = None
@@ -172,6 +173,8 @@ class DocumentAnswerResponseTests(unittest.TestCase):
             return {
                 "relevant": True,
                 "selected_rank": 2,
+                "confidence": 0.91,
+                "answer": "",
                 "reason": "Kandidat kedua relevan.",
                 "reformulated_question": "",
             }
@@ -185,7 +188,8 @@ class DocumentAnswerResponseTests(unittest.TestCase):
 
         self.assertIs(selected, candidates[1])
         self.assertEqual(selected["answer_id"], 42)
-        self.assertEqual(reason, "Kandidat kedua relevan.")
+        self.assertIn("Kandidat kedua relevan.", reason)
+        self.assertEqual(selected["judge_confidence"], 0.91)
         self.assertEqual(checked, 2)
 
     def test_batch_keeps_high_score_shortcut(self):
@@ -210,7 +214,7 @@ class DocumentAnswerResponseTests(unittest.TestCase):
         self.assertEqual(checked, 1)
         self.assertEqual(calls, 0)
 
-    def test_invalid_batch_response_falls_back_to_single(self):
+    def test_invalid_batch_response_fails_closed(self):
         handler = _load_search_handler()
         candidate = _candidate()
         candidate["final_score"] = 0.85
@@ -232,10 +236,10 @@ class DocumentAnswerResponseTests(unittest.TestCase):
             handler.check_relevance_batch_with_ai([candidate], "pertanyaan", max_check=5)
         )
 
-        self.assertIs(selected, candidate)
-        self.assertEqual(reason, "fallback single")
+        self.assertIsNone(selected)
+        self.assertIn("Combined AI judge gagal", reason)
         self.assertEqual(checked, 1)
-        self.assertEqual(fallback_calls, 1)
+        self.assertEqual(fallback_calls, 0)
 
     def test_relevance_dispatcher_uses_configured_mode(self):
         handler = _load_search_handler()
@@ -300,6 +304,8 @@ class DocumentAnswerResponseTests(unittest.TestCase):
             return {
                 "relevant": False,
                 "selected_rank": None,
+                "confidence": 0.0,
+                "answer": "",
                 "reason": "Tidak ada kandidat yang menjawab.",
                 "reformulated_question": "",
             }
@@ -321,7 +327,7 @@ class DocumentAnswerResponseTests(unittest.TestCase):
             response["data"]["similar_questions"][0],
         )
 
-    def test_batch_selected_document_still_uses_answer_extraction(self):
+    def test_batch_selected_document_uses_combined_answer_without_second_call(self):
         handler = _load_search_handler()
         candidate = _candidate("Context parent dokumen")
         candidate["final_score"] = 0.85
@@ -333,12 +339,14 @@ class DocumentAnswerResponseTests(unittest.TestCase):
             return {
                 "relevant": True,
                 "selected_rank": 1,
+                "confidence": 0.93,
+                "answer": "Jawaban akhir dari combined judge.",
                 "reason": "Dokumen memuat jawaban.",
                 "reformulated_question": "",
             }
 
         async def ai_extract_answer(*_args, **_kwargs):
-            return "Jawaban akhir dari context parent."
+            self.fail("Second extraction call must not run in combined mode")
 
         handler.parallel_search_services = parallel_search_services
         handler.aggregate_and_sort_candidates = lambda *_args: [candidate]
@@ -350,7 +358,7 @@ class DocumentAnswerResponseTests(unittest.TestCase):
 
         result = response["data"]["similar_questions"][0]
         self.assertEqual(response["status"], "success")
-        self.assertEqual(result["answer_doc"], "Jawaban akhir dari context parent.")
+        self.assertEqual(result["answer_doc"], "Jawaban akhir dari combined judge.")
         self.assertNotIn("extracted_answer", result)
 
     def test_single_and_batch_success_payload_shapes_are_identical(self):
@@ -375,6 +383,8 @@ class DocumentAnswerResponseTests(unittest.TestCase):
                 return {
                     "relevant": True,
                     "selected_rank": 1,
+                    "confidence": 0.9,
+                    "answer": "",
                     "reason": "batch relevant",
                     "reformulated_question": "",
                 }

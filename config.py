@@ -72,6 +72,7 @@ class Config:
     LLM_TIMEOUT = _env("LLM_TIMEOUT_SEC", 60, int)
     LLM_PROVIDER = _env("LLM_PROVIDER", "gemini") # "gemini" atau "router"
     RELEVANCE_MODE = _env("RELEVANCE_MODE", "single")
+    RELEVANCE_CONFIDENCE_THRESHOLD = _env("RELEVANCE_CONFIDENCE_THRESHOLD", 0.75, float)
     
     ENABLE_CITATION = _env("ENABLE_CITATION", "true", bool)
     

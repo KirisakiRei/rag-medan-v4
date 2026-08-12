@@ -372,6 +372,7 @@ async def ai_check_batch_relevance(
             "rank": rank,
             "source": candidate.get("source", "unknown"),
             "final_score": candidate.get("final_score", 0.0),
+            "note": candidate.get("note", ""),
             "content": content,
         })
 
@@ -385,7 +386,9 @@ async def ai_check_batch_relevance(
 
     try:
         prompt = (
-            get_cached_variable("prompt_ai_batch_relevance")
+            # Key baru: jangan gunakan override DB lama yang masih memakai
+            # kontrak tanpa confidence + answer.
+            get_cached_variable("prompt_ai_combined_judge")
             or PROMPT_AI_BATCH_RELEVANCE
         )
         user_message = json.dumps(
@@ -435,6 +438,27 @@ async def ai_check_batch_relevance(
             logger.warning("[AI-BATCH] selected_rank must be null when relevant=false")
             return None
 
+        confidence = parsed.get("confidence")
+        if (
+            isinstance(confidence, bool)
+            or not isinstance(confidence, (int, float))
+            or not 0.0 <= float(confidence) <= 1.0
+        ):
+            logger.warning("[AI-BATCH] Field 'confidence' must be number 0.0-1.0")
+            return None
+
+        answer = parsed.get("answer")
+        if not isinstance(answer, str):
+            logger.warning("[AI-BATCH] Field 'answer' must be a string")
+            return None
+        answer = answer.strip()
+        if relevant and not answer and batch_candidates[selected_rank - 1]["source"] != "text":
+            logger.warning("[AI-BATCH] Relevant non-text candidate must include answer")
+            return None
+        if not relevant and answer:
+            logger.warning("[AI-BATCH] answer must be empty when relevant=false")
+            return None
+
         reason = parsed.get("reason")
         reformulated_question = parsed.get("reformulated_question")
         if not isinstance(reason, str):
@@ -453,6 +477,8 @@ async def ai_check_batch_relevance(
         return {
             "relevant": relevant,
             "selected_rank": selected_rank,
+            "confidence": float(confidence),
+            "answer": answer,
             "reason": reason.strip() or "-",
             "reformulated_question": reformulated,
         }

@@ -114,12 +114,14 @@ class BatchRelevanceFilteringTests(unittest.TestCase):
             return json.dumps({
                 "relevant": True,
                 "selected_rank": 2,
+                "confidence": 0.91,
+                "answer": "Hotel A dan Hotel B.",
                 "reason": "Kandidat kedua memuat daftar hotel.",
                 "reformulated_question": "",
             })
 
         filtering.get_cached_variable = (
-            lambda key: "CUSTOM BATCH PROMPT" if key == "prompt_ai_batch_relevance" else None
+            lambda key: "CUSTOM BATCH PROMPT" if key == "prompt_ai_combined_judge" else None
         )
         filtering.call_filter_llm = call_filter_llm
 
@@ -144,6 +146,8 @@ class BatchRelevanceFilteringTests(unittest.TestCase):
                     return json.dumps({
                         "relevant": True,
                         "selected_rank": invalid_rank,
+                        "confidence": 0.9,
+                        "answer": "Jawaban",
                         "reason": "invalid",
                         "reformulated_question": "",
                     })
@@ -163,6 +167,8 @@ class BatchRelevanceFilteringTests(unittest.TestCase):
             return json.dumps({
                 "relevant": False,
                 "selected_rank": None,
+                "confidence": 0.0,
+                "answer": "",
                 "reason": "Tidak ada kandidat yang menjawab.",
                 "reformulated_question": "Daftar hotel apa saja di Medan?",
             })
@@ -175,6 +181,35 @@ class BatchRelevanceFilteringTests(unittest.TestCase):
 
         self.assertFalse(result["relevant"])
         self.assertIsNone(result["selected_rank"])
+        self.assertEqual(result["confidence"], 0.0)
+        self.assertEqual(result["answer"], "")
+
+    def test_batch_rejects_invalid_confidence_or_missing_answer(self):
+        filtering = _load_filtering_module()
+
+        invalid_payloads = [
+            {"confidence": -0.1, "answer": "Jawaban"},
+            {"confidence": 1.1, "answer": "Jawaban"},
+            {"confidence": "0.9", "answer": "Jawaban"},
+            {"confidence": 0.9, "answer": ""},
+        ]
+        for invalid_values in invalid_payloads:
+            with self.subTest(invalid_values=invalid_values):
+                async def call_filter_llm(**_kwargs):
+                    return json.dumps({
+                        "relevant": True,
+                        "selected_rank": 2,
+                        "reason": "Kandidat relevan.",
+                        "reformulated_question": "",
+                        **invalid_values,
+                    })
+
+                filtering.call_filter_llm = call_filter_llm
+                result = asyncio.run(filtering.ai_check_batch_relevance(
+                    "hotel di medan apa saja?",
+                    _candidates(),
+                ))
+                self.assertIsNone(result)
 
     def test_batch_uses_default_prompt_when_override_is_empty(self):
         filtering = _load_filtering_module()
@@ -185,6 +220,8 @@ class BatchRelevanceFilteringTests(unittest.TestCase):
             return json.dumps({
                 "relevant": False,
                 "selected_rank": None,
+                "confidence": 0.0,
+                "answer": "",
                 "reason": "Tidak ada kandidat yang menjawab.",
                 "reformulated_question": "",
             })
@@ -226,6 +263,8 @@ class BatchRelevanceFilteringTests(unittest.TestCase):
                     return json.dumps({
                         "relevant": False,
                         "selected_rank": None,
+                        "confidence": 0.0,
+                        "answer": "",
                         **invalid_values,
                     })
 

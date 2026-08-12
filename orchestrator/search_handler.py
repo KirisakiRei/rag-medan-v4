@@ -433,16 +433,15 @@ async def check_relevance_batch_with_ai(
     batch_result = await ai_check_batch_relevance(user_question, batch_candidates)
 
     if batch_result is None:
-        batch_duration = time.time() - relevance_start
         logger.warning(
-            "[AI-RELEVANCE] Batch response invalid, falling back to single mode"
+            "[AI-RELEVANCE] Combined judge response invalid — fail closed"
         )
-        selected, reason, checked, single_duration = await check_relevance_with_ai(
-            all_candidates,
-            user_question,
-            max_check=max_check,
+        return (
+            None,
+            "Combined AI judge gagal memberikan respons valid",
+            len(batch_candidates),
+            time.time() - relevance_start,
         )
-        return selected, reason, checked, batch_duration + single_duration
 
     ai_reason = batch_result.get("reason", "-")
     if not batch_result.get("relevant", False):
@@ -454,13 +453,53 @@ async def check_relevance_batch_with_ai(
 
     selected_rank = batch_result["selected_rank"]
     selected_candidate = batch_candidates[selected_rank - 1]
+    confidence = float(batch_result.get("confidence", 0.0))
+    if confidence < config.RELEVANCE_CONFIDENCE_THRESHOLD:
+        relevance_duration = time.time() - relevance_start
+        logger.info(
+            f"[AI-RELEVANCE] BATCH: rejected confidence={confidence:.3f} "
+            f"< threshold={config.RELEVANCE_CONFIDENCE_THRESHOLD:.3f}"
+        )
+        return (
+            None,
+            f"Confidence {confidence:.3f} di bawah threshold "
+            f"{config.RELEVANCE_CONFIDENCE_THRESHOLD:.3f}",
+            len(batch_candidates),
+            relevance_duration,
+        )
+
+    answer = str(batch_result.get("answer") or "").strip()
+    source = selected_candidate.get("source", "unknown")
+    if source != "text":
+        is_valid_answer, invalid_reason = validate_extracted_answer(answer)
+        if not is_valid_answer or _is_lightrag_negative_answer(answer):
+            relevance_duration = time.time() - relevance_start
+            logger.warning(
+                f"[AI-RELEVANCE] BATCH: combined answer rejected: "
+                f"{invalid_reason or 'negative_answer'}"
+            )
+            return (
+                None,
+                f"Combined answer rejected: {invalid_reason or 'negative_answer'}",
+                len(batch_candidates),
+                relevance_duration,
+            )
+        selected_candidate["answer_doc"] = answer
+        selected_candidate["note"] = "combined_judge_answer"
+
+    selected_candidate["judge_confidence"] = confidence
     relevance_duration = time.time() - relevance_start
     logger.info(
         f"[AI-RELEVANCE] BATCH: selected rank={selected_rank} "
         f"source={selected_candidate.get('source', 'unknown').upper()} "
-        f"score={selected_candidate.get('final_score', 0):.4f}"
+        f"confidence={confidence:.3f}"
     )
-    return selected_candidate, ai_reason, len(batch_candidates), relevance_duration
+    return (
+        selected_candidate,
+        f"{ai_reason} (confidence={confidence:.3f})",
+        len(batch_candidates),
+        relevance_duration,
+    )
 
 
 async def check_relevance_by_mode(
@@ -771,45 +810,53 @@ async def unified_search(
     # 5. AI RELEVANCE CHECK (RANKER v3)
     # Berlaku untuk SEMUA engine (LightRAG maupun Legacy).
     # Tidak ada lagi short-circuit yang membypass filter LLM kita.
-    selected_candidate, ai_reason, candidates_checked, relevance_duration = \
-        await check_relevance_by_mode(all_candidates, user_question, max_check=5)
+    if engine == "lightrag":
+        logger.info("[AI-RELEVANCE] LightRAG: combined judge+extract mode")
+        selected_candidate, ai_reason, candidates_checked, relevance_duration = \
+            await check_relevance_batch_with_ai(all_candidates, user_question, max_check=5)
+    else:
+        selected_candidate, ai_reason, candidates_checked, relevance_duration = \
+            await check_relevance_by_mode(all_candidates, user_question, max_check=5)
     
     # 5.5 AI EXTRACTION FOR DOCUMENT & WEB
     if selected_candidate:
         source = selected_candidate.get("source", "unknown")
-        if source in ["document", "web"]:
-                logger.info(f"[AI-EXTRACT] Extracting answer from {source.upper()}...")
-                extract_start = time.time()
-                raw_text = selected_candidate.get("answer_doc", "")
-                
-                # Prepare metadata
-                metadata = {}
-                if source == "document":
-                    metadata = selected_candidate.get("document_info", {})
-                elif source == "web":
-                    metadata = selected_candidate.get("web_info", {})
-                    
-                extracted_answer = await ai_extract_answer(
-                    user_question, 
-                    raw_text, 
-                    source, 
-                    metadata
-                )
+        if (
+            source in ["document", "web"]
+            and selected_candidate.get("note") != "combined_judge_answer"
+        ):
+            logger.info(f"[AI-EXTRACT] Extracting answer from {source.upper()}...")
+            extract_start = time.time()
+            raw_text = selected_candidate.get("answer_doc", "")
 
-                is_valid_answer, invalid_reason = validate_extracted_answer(extracted_answer)
-                if is_valid_answer:
-                    selected_candidate["answer_doc"] = extracted_answer.strip()
-                    logger.info("[AI-EXTRACT] Valid answer accepted")
-                else:
-                    selected_candidate["answer_doc"] = "Tidak ditemukan"
-                    selected_candidate["note"] = f"invalid_extraction_{invalid_reason}"
-                    extraction_failure_candidate = selected_candidate
-                    selected_candidate = None
-                    ai_reason = f"AI extraction rejected: {invalid_reason}"
-                    logger.warning(f"[AI-EXTRACT] Invalid answer rejected: {invalid_reason}")
-                
-                extract_duration = time.time() - extract_start
-                logger.info(f"[AI-EXTRACT] Done in {extract_duration:.2f}s")
+            # Prepare metadata
+            metadata = {}
+            if source == "document":
+                metadata = selected_candidate.get("document_info", {})
+            elif source == "web":
+                metadata = selected_candidate.get("web_info", {})
+
+            extracted_answer = await ai_extract_answer(
+                user_question,
+                raw_text,
+                source,
+                metadata,
+            )
+
+            is_valid_answer, invalid_reason = validate_extracted_answer(extracted_answer)
+            if is_valid_answer:
+                selected_candidate["answer_doc"] = extracted_answer.strip()
+                logger.info("[AI-EXTRACT] Valid answer accepted")
+            else:
+                selected_candidate["answer_doc"] = "Tidak ditemukan"
+                selected_candidate["note"] = f"invalid_extraction_{invalid_reason}"
+                extraction_failure_candidate = selected_candidate
+                selected_candidate = None
+                ai_reason = f"AI extraction rejected: {invalid_reason}"
+                logger.warning(f"[AI-EXTRACT] Invalid answer rejected: {invalid_reason}")
+
+            extract_duration = time.time() - extract_start
+            logger.info(f"[AI-EXTRACT] Done in {extract_duration:.2f}s")
 
     total_duration = time.time() - start_time
     
