@@ -231,6 +231,12 @@ async def _index_document(
 
     try:
         source_descriptor = f"{source_type}:{source_id}"
+        # LightRAG juga melakukan deduplikasi berdasarkan hash konten. Dua FAQ
+        # dapat memiliki pertanyaan identik tetapi answer_id/source_id berbeda;
+        # tanpa provenance marker, source kedua ditolak sebagai identical content.
+        # Marker ini metadata internal, bukan jawaban FAQ, dan menjaga hubungan
+        # satu-ke-satu antara retrieved source dengan application source ID.
+        indexed_content = f"Source-ID: {source_descriptor}\n{content}"
         existing = await _find_document_by_source(source_descriptor)
         if existing:
             await _delete_actual_document(
@@ -238,7 +244,7 @@ async def _index_document(
                 source_descriptor,
             )
         result = await lightrag_client.insert_text(
-            text=content,
+            text=indexed_content,
             file_source=source_descriptor,
         )
         track_id = str(result.get("track_id") or "").strip()

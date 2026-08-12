@@ -137,10 +137,40 @@ class ConfirmedIndexTests(unittest.TestCase):
                 "d-1",
             ))
 
-        insert.assert_awaited_once_with(text="body", file_source="document:d-1")
+        insert.assert_awaited_once_with(
+            text="Source-ID: document:d-1\nbody",
+            file_source="document:d-1",
+        )
         wait.assert_awaited_once_with("insert-1", "document:d-1")
         self.assertEqual(result["status"], "success")
         self.assertEqual(result["lightrag_document_id"], "doc-real")
+
+    def test_identical_business_content_is_unique_per_source(self):
+        insert = AsyncMock(return_value={"status": "success", "track_id": "insert-1"})
+        wait = AsyncMock(return_value={
+            "id": "doc-real",
+            "status": "PROCESSED",
+            "file_path": "text:q-2",
+        })
+
+        with patch.object(adapter_sync.lightrag_client, "insert_text", insert), \
+             patch.object(adapter_sync, "_wait_until_indexed", wait), \
+             patch.object(
+                 adapter_sync,
+                 "_find_document_by_source",
+                 AsyncMock(return_value=None),
+             ):
+            result = asyncio.run(adapter_sync._index_document(
+                "kb:medan-main:text:q-2",
+                "Title: Pertanyaan sama\n\nQuestion:\nPertanyaan sama",
+                "text",
+                "q-2",
+            ))
+
+        indexed_text = insert.await_args.kwargs["text"]
+        self.assertTrue(indexed_text.startswith("Source-ID: text:q-2\n"))
+        self.assertNotIn("Answer:", indexed_text)
+        self.assertEqual(result["source_id"], "q-2")
 
     def test_missing_track_id_fails_closed(self):
         with patch.object(
