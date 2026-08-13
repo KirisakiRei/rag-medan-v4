@@ -15,7 +15,7 @@ import asyncio
 import hashlib
 import logging
 import time
-from typing import Dict, Any
+from typing import Dict, Any, List
 
 from services.lightrag_adapter.client import lightrag_client
 from services.lightrag_adapter.source_mapper import (
@@ -40,6 +40,7 @@ async def sync_text(
     content_hash: str,
     is_active: bool = True,
     category: str = None,
+    answer_id: List[str] = None,
     question: str = None,
     answer: str = None,
 ) -> Dict[str, Any]:
@@ -75,7 +76,11 @@ async def sync_text(
         raw_content=content if content else None,
     )
 
-    result = await _index_document(doc_id, normalized, "text", source_id)
+    metadata: Dict[str, Any] = {
+        "category_id": category,
+        "answer_id": answer_id or [],
+    }
+    result = await _index_document(doc_id, normalized, "text", source_id, metadata=metadata)
     result["content_hash"] = content_hash
     stats.record_sync("text", result.get("status") == "success")
     return result
@@ -211,6 +216,7 @@ async def _index_document(
     content: str,
     source_type: str,
     source_id: str,
+    metadata: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     """
     Kirim normalized content ke LightRAG untuk indexing.
@@ -246,6 +252,7 @@ async def _index_document(
         result = await lightrag_client.insert_text(
             text=indexed_content,
             file_source=source_descriptor,
+            metadata=metadata,
         )
         track_id = str(result.get("track_id") or "").strip()
         if result.get("status") != "success" or not track_id:

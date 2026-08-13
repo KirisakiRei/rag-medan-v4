@@ -9,6 +9,7 @@ from typing import Dict, Any
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from shared.lightrag_sync import sync_lightrag_text, delete_lightrag_source
+from shared.utils import safe_parse_answer_id
 
 logger = logging.getLogger("rag_text.sync")
 
@@ -20,8 +21,9 @@ async def _sync_item(item: Dict[str, Any]) -> Dict[str, Any]:
     if not question:
         raise ValueError(f"question kosong untuk question_rag_id={source_id}")
     category = item.get("category_id")
+    answer_id = safe_parse_answer_id(item.get("answer_id"))
     content_hash = hashlib.sha256(
-        f"{question}\n{category or ''}".encode("utf-8")
+        f"{question}\n{category or ''}\n{answer_id}".encode("utf-8")
     ).hexdigest()
     return await sync_lightrag_text(
         source_id=source_id,
@@ -30,6 +32,7 @@ async def _sync_item(item: Dict[str, Any]) -> Dict[str, Any]:
         content_hash=content_hash,
         is_active=True,
         category=category,
+        answer_id=answer_id,
         question=question,
         answer=None,
     )

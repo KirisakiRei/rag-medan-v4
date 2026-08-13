@@ -59,6 +59,7 @@ class SyncTextRequest(BaseModel):
     is_active: bool = True
     # Extra metadata untuk citation
     category: Optional[str] = None
+    answer_id: Optional[List[str]] = None
     question: Optional[str] = None
     answer: Optional[str] = None
 

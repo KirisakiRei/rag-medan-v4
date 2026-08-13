@@ -144,6 +144,7 @@ async def sync_text_endpoint(request: SyncTextRequest):
         content_hash=request.content_hash,
         is_active=request.is_active,
         category=request.category,
+        answer_id=request.answer_id,
         question=request.question,
         answer=request.answer,
     )

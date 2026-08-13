@@ -242,6 +242,7 @@ class TextSyncTests(unittest.TestCase):
             "question_rag_id": "q-1",
             "question": "Bagaimana mengurus KTP?",
             "category_id": "layanan",
+            "answer_id": ["a-1"],
         }
 
         with patch.object(text_sync, "sync_lightrag_text", confirmed):
@@ -251,8 +252,40 @@ class TextSyncTests(unittest.TestCase):
         kwargs = confirmed.await_args.kwargs
         self.assertEqual(kwargs["source_id"], "q-1")
         self.assertEqual(kwargs["question"], payload["question"])
+        self.assertEqual(kwargs["category"], "layanan")
+        self.assertEqual(kwargs["answer_id"], ["a-1"])
         self.assertIsNone(kwargs["answer"])
         self.assertTrue(kwargs["content_hash"])
+
+
+class AdapterTextSyncMetadataTests(unittest.TestCase):
+    def test_text_sync_sends_category_and_answer_id_metadata(self):
+        adapter_sync.lightrag_client.insert_text = AsyncMock(
+            return_value={"status": "success", "track_id": "track-1"}
+        )
+        adapter_sync._find_document_by_source = AsyncMock(return_value=None)
+        adapter_sync._wait_until_indexed = AsyncMock(return_value={"id": "doc-1"})
+
+        result = asyncio.run(adapter_sync.sync_text(
+            source_id="q-1",
+            knowledge_base_id="medan-main",
+            title="Bagaimana mengurus KTP?",
+            content="",
+            content_hash="hash-1",
+            category="layanan",
+            answer_id=["a-1"],
+            question="Bagaimana mengurus KTP?",
+            answer=None,
+        ))
+
+        self.assertEqual(result["status"], "success")
+        adapter_sync.lightrag_client.insert_text.assert_awaited_once()
+        kwargs = adapter_sync.lightrag_client.insert_text.await_args.kwargs
+        self.assertEqual(kwargs["file_source"], "text:q-1")
+        self.assertEqual(kwargs["metadata"], {
+            "category_id": "layanan",
+            "answer_id": ["a-1"],
+        })
 
 
 if __name__ == "__main__":

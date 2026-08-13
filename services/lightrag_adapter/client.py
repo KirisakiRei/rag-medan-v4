@@ -298,6 +298,7 @@ class LightRAGClient:
         self,
         text: str,
         file_source: str,
+        metadata: Dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
         """
         Insert text document ke LightRAG index.
@@ -308,6 +309,8 @@ class LightRAGClient:
             "text": text,
             "file_source": file_source,
         }
+        if metadata:
+            payload["metadata"] = metadata
         return await self._request("POST", "/documents/text", json_data=payload)
 
     async def insert_texts_batch(

@@ -105,6 +105,7 @@ def fire_lightrag_sync_text(
     content_hash: str = "",
     is_active: bool = True,
     category: Optional[str] = None,
+    answer_id: Optional[list] = None,
     question: Optional[str] = None,
     answer: Optional[str] = None,
 ) -> None:
@@ -124,6 +125,7 @@ def fire_lightrag_sync_text(
         content_hash=content_hash,
         is_active=is_active,
         category=category,
+        answer_id=answer_id,
         question=question,
         answer=answer,
     ))
@@ -217,6 +219,7 @@ async def _sync_text_task(
     content_hash: str,
     is_active: bool,
     category: Optional[str],
+    answer_id: Optional[list],
     question: Optional[str],
     answer: Optional[str],
 ) -> None:
@@ -230,6 +233,7 @@ async def _sync_text_task(
             "content_hash": content_hash,
             "is_active": is_active,
             "category": category,
+            "answer_id": answer_id or [],
             "question": question,
             "answer": answer,
         }

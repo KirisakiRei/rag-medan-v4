@@ -582,10 +582,10 @@ def build_success_response(
     source = selected_candidate.get("source", "unknown")
     
     similar_question = {
-        "question": selected_candidate.get("question", "-"),
-        "question_rag_name": selected_candidate.get("question", "-"),
-        "answer_id": selected_candidate.get("answer_id"),
-        "answer_doc": selected_candidate.get("answer_doc", ""),
+        "question": selected_candidate.get("question", "-") if source == "text" else "",
+        "question_rag_name": selected_candidate.get("question", "-") if source == "text" else "",
+        "answer_id": selected_candidate.get("answer_id") if source == "text" else None,
+        "answer_doc": selected_candidate.get("answer_doc", "") if source in ["document", "web"] else "",
         "category_id": selected_candidate.get("category_id"),
         "dense_score": selected_candidate.get("dense_score", 0.0),
         "overlap_score": selected_candidate.get("overlap_score", 0.0),
