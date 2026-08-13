@@ -201,6 +201,23 @@ class ConfirmedIndexTests(unittest.TestCase):
 
 
 class SourceMappingTests(unittest.TestCase):
+    def test_text_answer_ids_and_category_recovered_from_ingestion_header(self):
+        contexts = map_lightrag_context_to_canonical([{
+            "doc_id": "text:q-1",
+            "content": (
+                "Source-ID: text:q-1\n"
+                "Category-ID: layanan\n"
+                "Answer-ID: a-1,a-2\n"
+                "Title: Bagaimana mengurus KTP?\n\n"
+                "Question:\nBagaimana mengurus KTP?"
+            ),
+            "reference_id": "1",
+        }])
+
+        self.assertEqual(contexts[0]["source_type"], "text")
+        self.assertEqual(contexts[0]["answer_id"], ["a-1", "a-2"])
+        self.assertEqual(contexts[0]["category_id"], "layanan")
+
     def test_document_metadata_is_recovered_from_ingestion_header(self):
         contexts = map_lightrag_context_to_canonical([{
             "doc_id": "document:d-1",

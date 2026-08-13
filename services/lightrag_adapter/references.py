@@ -55,14 +55,24 @@ def _parse_source_descriptor(doc_descriptor: str) -> tuple[str, str]:
     return "", ""
 
 
-def _extract_ingestion_metadata(content: str) -> Dict[str, str]:
+def _extract_ingestion_metadata(content: str) -> Dict[str, Any]:
     """Read only trusted normalized header fields produced by our adapter."""
     header = str(content or "").split("\n\n", 1)[0]
-    metadata: Dict[str, str] = {}
-    for key in ("Title", "File", "URL"):
+    metadata: Dict[str, Any] = {}
+    for key, out_key in (
+        ("Title", "title"),
+        ("File", "file"),
+        ("URL", "url"),
+        ("Category-ID", "category_id"),
+    ):
         match = re.search(rf"(?m)^{key}:\s*(.+?)\s*$", header)
         if match:
-            metadata[key.lower()] = match.group(1).strip()
+            metadata[out_key] = match.group(1).strip()
+    match = re.search(r"(?m)^Answer-ID:\s*(.+?)\s*$", header)
+    if match:
+        metadata["answer_id"] = [
+            item.strip() for item in match.group(1).split(",") if item.strip()
+        ]
     return metadata
 
 
@@ -126,6 +136,8 @@ def map_lightrag_context_to_canonical(
             "content": content,
             "source_type": source_type,
             "source_id": source_id,
+            "answer_id": metadata.get("answer_id") if source_type == "text" else None,
+            "category_id": metadata.get("category_id") if source_type == "text" else None,
             "title": title,
             "source_uri": source_uri,
             "reference_id": str(ctx.get("reference_id") or idx + 1),

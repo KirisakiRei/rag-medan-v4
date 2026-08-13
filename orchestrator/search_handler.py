@@ -175,7 +175,11 @@ async def _run_lightrag_search(
         
         # Mapping spesifik metadata untuk legacy response compatibility
         if source_type == "text":
-            candidate["answer_id"] = ctx.get("source_id")
+            answer_ids = ctx.get("answer_id") or []
+            if not answer_ids and ctx.get("source_id"):
+                answer_ids = [str(ctx.get("source_id"))]
+            candidate["answer_id"] = answer_ids
+            candidate["category_id"] = ctx.get("category_id")
         elif source_type == "web":
             candidate["web_info"] = {
                 "web_bank_id": ctx.get("source_id"),

@@ -242,7 +242,17 @@ async def _index_document(
         # tanpa provenance marker, source kedua ditolak sebagai identical content.
         # Marker ini metadata internal, bukan jawaban FAQ, dan menjaga hubungan
         # satu-ke-satu antara retrieved source dengan application source ID.
-        indexed_content = f"Source-ID: {source_descriptor}\n{content}"
+        header_parts = [f"Source-ID: {source_descriptor}"]
+        if metadata:
+            category = metadata.get("category_id")
+            if category:
+                header_parts.append(f"Category-ID: {category}")
+            answer_ids = metadata.get("answer_id")
+            if answer_ids:
+                header_parts.append(
+                    "Answer-ID: " + ",".join(str(a) for a in answer_ids if str(a).strip())
+                )
+        indexed_content = "\n".join(header_parts) + "\n" + content
         existing = await _find_document_by_source(source_descriptor)
         if existing:
             await _delete_actual_document(
