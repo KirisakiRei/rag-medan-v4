@@ -23,6 +23,7 @@ from services.lightrag_adapter.source_mapper import (
     normalize_text_content,
     normalize_document_content,
     normalize_web_content,
+    normalize_usulan_content,
 )
 from services.lightrag_adapter.stats import stats
 from services.lightrag_adapter.config import adapter_config
@@ -185,10 +186,69 @@ async def sync_web(
     return result
 
 
+# ============== SYNC — USULAN ==============
+
+async def sync_usulan(
+    source_id: str,
+    knowledge_base_id: str = "usulan-main",
+    title: str = "",
+    content: str = "",
+    content_hash: str = "",
+    is_active: bool = True,
+    organization_id: str = None,
+    request_id: str = None,
+    request_name: str = None,
+    question: str = None,
+) -> Dict[str, Any]:
+    """
+    Sync usulan knowledge ke LightRAG.
+
+    Payload mirip text: question-only (pertanyaan warga), tanpa jawaban.
+    Metadata usulan (organization_id, request_id, request_name) di-embed
+    ke header konten sebagai provenance.
+
+    Args:
+        source_id: Application primary key (request_rag_id).
+        knowledge_base_id: Workspace logis (default "usulan-main").
+        title: Request title / short form.
+        content: Pre-formatted content (jika ada).
+        content_hash: Hash konten — untuk traceability.
+        is_active: Jika False, hapus dari LightRAG.
+        organization_id: OPD identifier (metadata).
+        request_id: Application request id (metadata).
+        request_name: Full request name (metadata).
+        question: Request question text (request_rag_name).
+
+    Returns:
+        SyncResponse dict.
+    """
+    doc_id = make_document_id(knowledge_base_id, "usulan", source_id)
+
+    if not is_active:
+        return await _delete_source(doc_id, "usulan", source_id)
+
+    normalized = normalize_usulan_content(
+        title=title,
+        question=question or title,
+        organization_id=organization_id,
+        request_id=request_id,
+        request_name=request_name,
+    )
+
+    metadata: Dict[str, Any] = {
+        "category_id": organization_id,
+        "request_id": request_id,
+        "request_name": request_name,
+    }
+    result = await _index_document(doc_id, normalized, "usulan", source_id, metadata=metadata)
+    result["content_hash"] = content_hash
+    stats.record_sync("usulan", result.get("status") == "success")
+    return result
+
+
 # ============== DELETE ==============
 
-async def delete_source(
-    source_type: str,
+async def delete_source(    source_type: str,
     source_id: str,
     knowledge_base_id: str = "medan-main",
 ) -> Dict[str, Any]:

@@ -5,6 +5,7 @@ import time
 import logging
 from typing import Dict, Any, List
 
+import httpx
 from sentence_transformers import SentenceTransformer
 from qdrant_client import AsyncQdrantClient
 from qdrant_client.http import models as qdrant_models
@@ -30,6 +31,60 @@ def set_instances(embedding_model: SentenceTransformer, qdrant_client: AsyncQdra
     rag_summary_logger = summary_logger
 
 
+async def _search_lightrag_usulan(clean_request: str, limit: int) -> List[Dict[str, Any]]:
+    """
+    Query LightRAG Adapter dan kembalikan HANYA kandidat source_type='usulan'.
+
+    Pipeline usulan terpisah dari unified search: index LightRAG sama,
+    tetapi pemisahan dilakukan di level retrieval — konteks non-usulan
+    dibuang di sini, dan unified search (/api/search) otomatis membuang
+    konteks usulan (bukan bagian dari _SOURCE_PRIORITY).
+
+    Returns:
+        List of usulan candidate dicts (request_id, organization_id,
+        request_name, request_rag_name, dense_score, final_score, note).
+    """
+    async with httpx.AsyncClient(
+        base_url=config.LIGHTRAG_ADAPTER_URL,
+        headers={"X-API-Key": config.INTERNAL_API_KEY},
+        timeout=60.0,
+    ) as client:
+        response = await client.post(
+            "/internal/search",
+            json={
+                "query": clean_request,
+                "knowledge_base_id": "usulan-main",
+                "mode": config.LIGHTRAG_QUERY_MODE,
+                "top_k": limit * 3,
+                "include_references": True,
+            },
+        )
+        response.raise_for_status()
+        result = response.json()
+
+    if result.get("status") not in ("success", "no_results"):
+        raise RuntimeError(f"LightRAG adapter gagal: {result.get('message') or result}")
+
+    candidates = []
+    for ctx in result.get("contexts") or []:
+        if str(ctx.get("source_type") or "") != "usulan":
+            continue
+        content = str(ctx.get("content") or "").strip()
+        if not content:
+            continue
+        candidates.append({
+            "request_id": ctx.get("request_id"),
+            "organization_id": ctx.get("organization_id"),
+            "request_name": ctx.get("request_name"),
+            "request_rag_name": str(ctx.get("title") or "").strip() or content,
+            "dense_score": 0.0,
+            "final_score": 0.0,
+            "note": "lightrag_engine",
+        })
+
+    return candidates[:limit]
+
+
 async def search_usulan_bank(
     question: str,
     wa_number: str = "unknown",
@@ -53,61 +108,77 @@ async def search_usulan_bank(
     reformulation_duration = time.time() - reformulation_start
     clean_request = reformulation_result.get("clean_request", user_request)
 
-    # 2. Embedding & Query Qdrant
-    embedding_start = time.time()
-    [query_vector] = await encode_texts([clean_request], model=model, prefix="query: ")
-    embedding_duration = time.time() - embedding_start
-
-    qdrant_start = time.time()
-    _qp_response = await qdrant.query_points(
-        collection_name=config.COLLECTION_USULAN,
-        query=query_vector,
-        limit=limit
-    )
-    qdrant_results = _qp_response.points if hasattr(_qp_response, "points") else _qp_response
-    qdrant_duration = time.time() - qdrant_start
-
-    # Log kandidat hasil
+    # 2. Retrieval — LightRAG (filter source usulan), fallback Qdrant
+    lightrag_candidates = []
     try:
-        if qdrant_results:
-            logger.info("[USULAN-SEARCH] Kandidat Hasil Pencarian Usulan")
-            for index, hit in enumerate(qdrant_results[:3], start=1):
-                request_rag_name = (hit.payload.get("request_rag_name") or "-").strip()
-                dense_score = float(getattr(hit, "score", 0.0))
-                logger.info(f"[{index}] {request_rag_name} | Dense: {dense_score:.3f}")
-        else:
-            logger.warning("[USULAN-SEARCH] Tidak ada hasil dari Qdrant.")
+        lightrag_candidates = await _search_lightrag_usulan(clean_request, limit)
+        if lightrag_candidates:
+            logger.info(f"[USULAN-SEARCH] LightRAG: {len(lightrag_candidates)} kandidat usulan")
     except Exception as e:
-        logger.error(f"[USULAN-SEARCH] Gagal mencetak hasil pencarian: {e}")
+        logger.warning(f"[USULAN-SEARCH] LightRAG retrieval gagal, fallback Qdrant: {e}")
 
-    # 3. Scoring Logic
-    accepted_results, rejected_results = [], []
-    for hit in qdrant_results:
-        dense_score = float(hit.score)
-        final_score = round(dense_score, 3)
-        acceptance_note, is_accepted = "-", False
-        
-        if dense_score >= 0.85:
-            is_accepted, acceptance_note = True, "Data yang Relevan Ditemukan"
+    if lightrag_candidates:
+        accepted_results = lightrag_candidates
+        rejected_results = []
+        qdrant_results = []
+        embedding_duration = 0.0
+        qdrant_duration = 0.0
+    else:
+        # 2b. Embedding & Query Qdrant (fallback / legacy)
+        embedding_start = time.time()
+        [query_vector] = await encode_texts([clean_request], model=model, prefix="query: ")
+        embedding_duration = time.time() - embedding_start
 
-        result_item = {
-            "request_id": hit.payload.get("request_id"),
-            "organization_id": hit.payload.get("organization_id"),
-            "request_name": hit.payload.get("request_name"),
-            "request_rag_name": hit.payload.get("request_rag_name"),
-            "dense_score": dense_score,
-            "final_score": final_score,
-            "note": acceptance_note
-        }
-        (accepted_results if is_accepted else rejected_results).append(result_item)
+        qdrant_start = time.time()
+        _qp_response = await qdrant.query_points(
+            collection_name=config.COLLECTION_USULAN,
+            query=query_vector,
+            limit=limit
+        )
+        qdrant_results = _qp_response.points if hasattr(_qp_response, "points") else _qp_response
+        qdrant_duration = time.time() - qdrant_start
 
-    # Sort results
-    accepted_results = sorted(accepted_results, key=lambda x: x["final_score"], reverse=True)
-    rejected_results = sorted(rejected_results, key=lambda x: x["final_score"], reverse=True)
+        # Log kandidat hasil
+        try:
+            if qdrant_results:
+                logger.info("[USULAN-SEARCH] Kandidat Hasil Pencarian Usulan")
+                for index, hit in enumerate(qdrant_results[:3], start=1):
+                    request_rag_name = (hit.payload.get("request_rag_name") or "-").strip()
+                    dense_score = float(getattr(hit, "score", 0.0))
+                    logger.info(f"[{index}] {request_rag_name} | Dense: {dense_score:.3f}")
+            else:
+                logger.warning("[USULAN-SEARCH] Tidak ada hasil dari Qdrant.")
+        except Exception as e:
+            logger.error(f"[USULAN-SEARCH] Gagal mencetak hasil pencarian: {e}")
+
+        # 3. Scoring Logic (legacy)
+        accepted_results, rejected_results = [], []
+        for hit in qdrant_results:
+            dense_score = float(hit.score)
+            final_score = round(dense_score, 3)
+            acceptance_note, is_accepted = "-", False
+
+            if dense_score >= 0.85:
+                is_accepted, acceptance_note = True, "Data yang Relevan Ditemukan"
+
+            result_item = {
+                "request_id": hit.payload.get("request_id"),
+                "organization_id": hit.payload.get("organization_id"),
+                "request_name": hit.payload.get("request_name"),
+                "request_rag_name": hit.payload.get("request_rag_name"),
+                "dense_score": dense_score,
+                "final_score": final_score,
+                "note": acceptance_note
+            }
+            (accepted_results if is_accepted else rejected_results).append(result_item)
+
+        # Sort results
+        accepted_results = sorted(accepted_results, key=lambda x: x["final_score"], reverse=True)
+        rejected_results = sorted(rejected_results, key=lambda x: x["final_score"], reverse=True)
 
     # 4. AI Topic Relevance Check
-    if qdrant_results:
-        top_rag_name = qdrant_results[0].payload.get("request_rag_name", "-")
+    if accepted_results:
+        top_rag_name = accepted_results[0]["request_rag_name"]
         topic_check_result = await ai_relevance_usulan(user_request, top_rag_name)
     else:
         topic_check_result = {"relevant": True, "reason": "Tidak ada hasil RAG"}
@@ -167,7 +238,7 @@ async def search_usulan_bank(
         if rag_summary_logger:
             summary_lines = [
                 f"[USULAN] User: {user_request}",
-                f"Results: {len(qdrant_results)} | Relevant: {topic_check_result.get('relevant')}"
+                f"Results: {len(accepted_results) + len(rejected_results)} | Relevant: {topic_check_result.get('relevant')}"
             ]
             for index, result in enumerate(accepted_results[:3], start=1):
                 summary_lines.append(f"{index}. {result['request_rag_name']} | Dense={result['dense_score']:.3f}")

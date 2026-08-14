@@ -305,5 +305,69 @@ class AdapterTextSyncMetadataTests(unittest.TestCase):
         })
 
 
+class UsulanIntegrationTests(unittest.TestCase):
+    def test_parse_document_id_accepts_usulan(self):
+        from services.lightrag_adapter.source_mapper import make_document_id, parse_document_id
+        doc_id = make_document_id("usulan-main", "usulan", "u-1")
+        kb_id, source_type, source_id = parse_document_id(doc_id)
+        self.assertEqual(kb_id, "usulan-main")
+        self.assertEqual(source_type, "usulan")
+        self.assertEqual(source_id, "u-1")
+
+    def test_usulan_context_metadata_recovered_from_ingestion_header(self):
+        contexts = map_lightrag_context_to_canonical([{
+            "doc_id": "usulan:u-1",
+            "content": (
+                "Source-ID: usulan:u-1\n"
+                "Title: Perbaikan Jalan Rusak\n"
+                "Organization: opd-1\n"
+                "Request-ID: req-77\n"
+                "Request-Name: Perbaikan jalan di Kec. Medan Baru\n\n"
+                "Question:\nPerbaikan Jalan Rusak"
+            ),
+            "reference_id": "3",
+        }])
+
+        self.assertEqual(contexts[0]["source_type"], "usulan")
+        self.assertEqual(contexts[0]["source_id"], "u-1")
+        self.assertEqual(contexts[0]["request_id"], "req-77")
+        self.assertEqual(contexts[0]["request_name"], "Perbaikan jalan di Kec. Medan Baru")
+        self.assertEqual(contexts[0]["organization_id"], "opd-1")
+        self.assertEqual(contexts[0]["source_uri"], "usulan://u-1")
+
+    def test_adapter_sync_usulan_sends_question_only_content_and_metadata(self):
+        adapter_sync.lightrag_client.insert_text = AsyncMock(
+            return_value={"status": "success", "track_id": "track-1"}
+        )
+        adapter_sync._find_document_by_source = AsyncMock(return_value=None)
+        adapter_sync._wait_until_indexed = AsyncMock(return_value={"id": "doc-1"})
+
+        result = asyncio.run(adapter_sync.sync_usulan(
+            source_id="u-1",
+            knowledge_base_id="usulan-main",
+            title="Perbaikan Jalan Rusak",
+            content="",
+            content_hash="hash-u",
+            organization_id="opd-1",
+            request_id="req-77",
+            request_name="Perbaikan jalan di Kec. Medan Baru",
+            question="Perbaikan Jalan Rusak",
+        ))
+
+        self.assertEqual(result["status"], "success")
+        adapter_sync.lightrag_client.insert_text.assert_awaited_once()
+        kwargs = adapter_sync.lightrag_client.insert_text.await_args.kwargs
+        self.assertEqual(kwargs["file_source"], "usulan:u-1")
+        self.assertEqual(kwargs["metadata"], {
+            "category_id": "opd-1",
+            "request_id": "req-77",
+            "request_name": "Perbaikan jalan di Kec. Medan Baru",
+        })
+        # Question-only: tidak ada Answer di konten yang dikirim
+        self.assertNotIn("Answer:", kwargs["text"])
+        self.assertIn("Question:", kwargs["text"])
+        self.assertIn("Request-ID: req-77", kwargs["text"])
+
+
 if __name__ == "__main__":
     unittest.main()

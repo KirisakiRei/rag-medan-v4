@@ -37,6 +37,7 @@ from services.lightrag_adapter.models import (
     SyncTextRequest,
     SyncDocumentRequest,
     SyncWebRequest,
+    SyncUsulanRequest,
 )
 
 # Setup logging — konsisten dengan service lainnya
@@ -203,6 +204,37 @@ async def sync_web_endpoint(request: SyncWebRequest):
         clean_content=request.clean_content,
         content_hash=request.content_hash,
         is_active=request.is_active,
+    )
+
+    return JSONResponse(status_code=200, content=result)
+
+
+# ============== SYNC — USULAN ==============
+
+@app.post("/internal/sync/usulan")
+async def sync_usulan_endpoint(request: SyncUsulanRequest):
+    """
+    Sync usulan knowledge ke LightRAG.
+
+    Dipanggil oleh rag_usulan service setelah Qdrant upsert.
+    Payload mirip text (question-only) + metadata usulan.
+    """
+    logger.info(
+        f"[SYNC-USULAN] source_id={request.source_id} "
+        f"title='{request.title[:50]}' active={request.is_active}"
+    )
+
+    result = await sync_module.sync_usulan(
+        source_id=request.source_id,
+        knowledge_base_id=request.knowledge_base_id,
+        title=request.title,
+        content=request.content,
+        content_hash=request.content_hash,
+        is_active=request.is_active,
+        organization_id=request.organization_id,
+        request_id=request.request_id,
+        request_name=request.request_name,
+        question=request.question,
     )
 
     return JSONResponse(status_code=200, content=result)

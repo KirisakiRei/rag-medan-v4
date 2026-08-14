@@ -41,13 +41,13 @@ def _parse_source_descriptor(doc_descriptor: str) -> tuple[str, str]:
         return "", ""
 
     parts = doc_descriptor.split(":")
-    valid_types = {"text", "document", "web"}
+    valid_types = {"text", "document", "web", "usulan"}
     if len(parts) >= 4 and parts[0] == "kb" and parts[2] in valid_types:
         source_type = parts[2]
         source_id = ":".join(parts[3:])
         return (source_type, source_id) if source_id else ("", "")
 
-    if len(parts) >= 2 and parts[0] in ("text", "document", "web"):
+    if len(parts) >= 2 and parts[0] in ("text", "document", "web", "usulan"):
         source_type = parts[0]
         source_id = ":".join(parts[1:])
         return (source_type, source_id) if source_id else ("", "")
@@ -63,7 +63,10 @@ def _extract_ingestion_metadata(content: str) -> Dict[str, Any]:
         ("Title", "title"),
         ("File", "file"),
         ("URL", "url"),
+        ("Organization", "organization_id"),
         ("Category-ID", "category_id"),
+        ("Request-ID", "request_id"),
+        ("Request-Name", "request_name"),
     ):
         match = re.search(rf"(?m)^{key}:\s*(.+?)\s*$", header)
         if match:
@@ -138,6 +141,9 @@ def map_lightrag_context_to_canonical(
             "source_id": source_id,
             "answer_id": metadata.get("answer_id") if source_type == "text" else None,
             "category_id": metadata.get("category_id") if source_type == "text" else None,
+            "request_id": metadata.get("request_id") if source_type == "usulan" else None,
+            "request_name": metadata.get("request_name") if source_type == "usulan" else None,
+            "organization_id": metadata.get("organization_id") if source_type == "usulan" else None,
             "title": title,
             "source_uri": source_uri,
             "reference_id": str(ctx.get("reference_id") or idx + 1),

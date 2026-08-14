@@ -92,6 +92,26 @@ class SyncWebRequest(BaseModel):
     is_active: bool = True
 
 
+# ============== SYNC — USULAN ==============
+
+class SyncUsulanRequest(BaseModel):
+    """Request untuk POST /internal/sync/usulan.
+
+    Payload mirip text (question-only), ditambah metadata usulan
+    (organization_id, request_id, request_name) untuk provenance.
+    """
+    source_id: str
+    knowledge_base_id: str = "usulan-main"
+    title: str
+    content: str
+    content_hash: str
+    is_active: bool = True
+    organization_id: Optional[str] = None
+    request_id: Optional[str] = None
+    request_name: Optional[str] = None
+    question: Optional[str] = None
+
+
 # ============== SYNC RESPONSE ==============
 
 class SyncResponse(BaseModel):

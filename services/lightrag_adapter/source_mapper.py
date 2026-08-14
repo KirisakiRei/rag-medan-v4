@@ -71,7 +71,7 @@ def parse_document_id(document_id: str) -> Tuple[str, str, str]:
     source_type = parts[2]
     # source_id bisa mengandung ':' (misal URL), jadi join sisa parts
     source_id = ":".join(parts[3:])
-    if source_type not in ("text", "document", "web") or not source_id:
+    if source_type not in ("text", "document", "web", "usulan") or not source_id:
         raise SourceMappingError(f"Cannot parse document ID: {document_id!r}")
     return kb_id, source_type, source_id
 
@@ -104,6 +104,8 @@ def make_source_uri(source_type: str, source_id: str, **kwargs) -> str:
     elif source_type == "web":
         url = kwargs.get("url", "")
         return url if url else f"web://{source_id}"
+    elif source_type == "usulan":
+        return f"usulan://{source_id}"
     else:
         return f"{source_type}://{source_id}"
 
@@ -174,3 +176,32 @@ def normalize_web_content(
         Normalized text string.
     """
     return f"Title: {title}\nURL: {url}\n\n{clean_content}"
+
+
+def normalize_usulan_content(
+    title: str,
+    question: Optional[str] = None,
+    organization_id: Optional[str] = None,
+    request_id: Optional[str] = None,
+    request_name: Optional[str] = None,
+) -> str:
+    """
+    Normalize usulan content sebelum dikirim ke LightRAG.
+
+    Usulan bersifat question-only (pertanyaan warga), tanpa jawaban —
+    sama seperti FAQ/text. Header memuat metadata provenance yang
+    di-parse balik saat retrieval.
+
+    Returns:
+        Normalized text string.
+    """
+    parts = [f"Title: {title}"]
+    if organization_id:
+        parts.append(f"Organization: {organization_id}")
+    if request_id:
+        parts.append(f"Request-ID: {request_id}")
+    if request_name:
+        parts.append(f"Request-Name: {request_name}")
+    if question:
+        parts.append(f"\nQuestion:\n{question}")
+    return "\n".join(parts)

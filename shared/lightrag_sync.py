@@ -86,6 +86,23 @@ async def sync_lightrag_text(**kwargs) -> Dict[str, Any]:
     return _validate_adapter_response(response, f"text:{kwargs.get('source_id')}")
 
 
+async def sync_lightrag_usulan(**kwargs) -> Dict[str, Any]:
+    """Synchronously await confirmed usulan ingestion through the adapter.
+
+    Payload mirip text (question-only): source_id, title, content,
+    content_hash, is_active, organization_id, request_id,
+    request_name, question.
+    """
+    if not _should_sync():
+        raise RuntimeError("LightRAG sync nonaktif; RAG_SEARCH_ENGINE harus lightrag atau shadow")
+    response = await _get_client().post(
+        "/internal/sync/usulan",
+        json=kwargs,
+        timeout=config.LIGHTRAG_INDEX_TIMEOUT_SEC + 30,
+    )
+    return _validate_adapter_response(response, f"usulan:{kwargs.get('source_id')}")
+
+
 async def delete_lightrag_source(source_type: str, source_id: str) -> Dict[str, Any]:
     """Synchronously await adapter acknowledgement for source deletion."""
     if not _should_sync():
